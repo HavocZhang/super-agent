@@ -11,8 +11,12 @@ use tracing::{debug, info, warn};
 // ── Agent 引擎 ──────────────────────────────────────────────
 // 核心运行时，管理消息循环、工具调用、权限检查、上下文窗口等
 
-/// 工具输出最大字节数（约 8K tokens）
-const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
+/// 工具输出最大字节数（约 4K tokens）
+const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
+
+/// 每轮工具输出总字节数上限（约 50K tokens）
+/// 超过此值后强制压缩上下文
+const MAX_TURN_TOOL_OUTPUT_BYTES: usize = 200 * 1024;
 
 /// 截断工具输出到指定字节数，确保保持在上下文窗口内
 /// 会正确处理 UTF-8 字符边界
@@ -247,9 +251,22 @@ impl AgentEngine {
         tokio::spawn(async move {
             let mut last_call_signature: Option<String> = None;
             let mut consecutive_same_tool: usize = 0;
+            let mut turn_tool_bytes: usize = 0;
 
             for iteration in 0..max_iter {
                 info!("Agent iteration {}/{}", iteration + 1, max_iter);
+
+                // Force compaction if accumulated tool output is too large
+                if turn_tool_bytes > MAX_TURN_TOOL_OUTPUT_BYTES {
+                    warn!("Turn tool output exceeded {}KB, forcing compaction", turn_tool_bytes / 1024);
+                    let msgs = messages.read().await;
+                    let compacted = context.compact(&msgs, "[Auto-compacted: accumulated tool output exceeded limit]");
+                    drop(msgs);
+                    let mut msgs = messages.write().await;
+                    *msgs = compacted;
+                    turn_tool_bytes = 0;
+                    info!("Forced compaction done");
+                }
 
                 // Check context compaction
                 {
@@ -258,6 +275,7 @@ impl AgentEngine {
                         let compacted = context.compact(&msgs, "[Context was auto-compacted]");
                         let mut msgs = messages.write().await;
                         *msgs = compacted;
+                        turn_tool_bytes = 0;
                         info!("Context auto-compacted");
                     }
                 }
@@ -403,7 +421,8 @@ impl AgentEngine {
                         let mut last_tool_call_id = String::new();
                         for result in results {
                             let output = truncate_tool_output(&result.output, MAX_TOOL_OUTPUT_BYTES);
-                            info!("Tool {} done ({} bytes)", result.name, output.len());
+                            turn_tool_bytes += output.len();
+                            info!("Tool {} done ({} bytes, turn total {}KB)", result.name, output.len(), turn_tool_bytes / 1024);
 
                             // Doom loop detection
                             let call_signature = format!("{}:{}", result.name, result.arguments_hash);
