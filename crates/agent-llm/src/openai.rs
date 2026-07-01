@@ -2,10 +2,14 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::provider::{LlmProvider, StreamEvent, StreamResponse};
 use crate::types::{ChatRequest, ChatResponse, Role, ToolCall};
+
+const MAX_RETRIES: u32 = 10;
+const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(15);
+const MAX_AUTH_RETRIES: u32 = 2;
 
 pub struct OpenAiProvider {
     client: Client,
@@ -106,6 +110,23 @@ impl OpenAiProvider {
     }
 }
 
+fn should_retry_status(status: u16, attempt: u32) -> bool {
+    match status {
+        429 | 500 | 502 | 503 => true,
+        401 | 403 => attempt < MAX_AUTH_RETRIES,
+        _ => false,
+    }
+}
+
+fn backoff_delay(attempt: u32) -> std::time::Duration {
+    use rand::Rng;
+    let base = std::time::Duration::from_secs(1);
+    let delay = base * 2u32.saturating_pow(attempt);
+    let capped = delay.min(MAX_BACKOFF);
+    let jitter_ms = rand::thread_rng().gen_range(0..capped.as_millis().max(1) as u64 / 4 + 1);
+    capped + std::time::Duration::from_millis(jitter_ms)
+}
+
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
@@ -113,65 +134,98 @@ impl LlmProvider for OpenAiProvider {
 
         debug!("Sending request to {}/chat/completions", self.base_url);
 
-        let response = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to send request to LLM")?;
+        let mut last_err = None;
+        for attempt in 0..=MAX_RETRIES {
+            match self
+                .client
+                .post(format!("{}/chat/completions", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => {
+                    let bytes = r
+                        .bytes()
+                        .await
+                        .context("Failed to read LLM response body")?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("LLM API error ({}): {}", status, error_text);
+                    let text = String::from_utf8_lossy(&bytes);
+
+                    let data: Value = serde_json::from_str(&text)
+                        .context("Failed to parse LLM response as JSON")?;
+
+                    debug!(
+                        "Response: {}",
+                        serde_json::to_string_pretty(&data).unwrap_or_default()
+                    );
+
+                    let choice = data["choices"]
+                        .as_array()
+                        .and_then(|arr| arr.first())
+                        .context("No choices in response")?;
+
+                    let message = &choice["message"];
+
+                    if let Some(tool_calls) = message["tool_calls"].as_array() {
+                        let calls: Vec<ToolCall> = tool_calls
+                            .iter()
+                            .map(|tc| ToolCall {
+                                id: tc["id"].as_str().unwrap_or_default().to_string(),
+                                name: tc["function"]["name"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                arguments: serde_json::from_str(
+                                    tc["function"]["arguments"].as_str().unwrap_or("{}"),
+                                )
+                                .unwrap_or_default(),
+                            })
+                            .collect();
+
+                        return Ok(ChatResponse::ToolCall(calls));
+                    } else {
+                        let content = message["content"].as_str().unwrap_or("").to_string();
+                        return Ok(ChatResponse::Text(content));
+                    }
+                }
+                Ok(r) => {
+                    let status = r.status().as_u16();
+                    let error_text = r.text().await.unwrap_or_default();
+                    last_err = Some(format!("LLM API error ({}): {}", status, error_text));
+                    if attempt < MAX_RETRIES && should_retry_status(status, attempt) {
+                        let delay = backoff_delay(attempt);
+                        warn!(
+                            "chat retry {}/{}: status={}, waiting {:?}",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            status,
+                            delay
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    anyhow::bail!("LLM API error ({}): {}", status, error_text);
+                }
+                Err(e) => {
+                    last_err = Some(format!("Request failed: {}", e));
+                    if attempt < MAX_RETRIES {
+                        let delay = backoff_delay(attempt);
+                        warn!(
+                            "chat retry {}/{}: network error, waiting {:?}",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            delay
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    anyhow::bail!("{}", last_err.unwrap());
+                }
+            }
         }
-
-        let bytes = response
-            .bytes()
-            .await
-            .context("Failed to read LLM response body")?;
-
-        let text = String::from_utf8_lossy(&bytes);
-
-        let data: Value =
-            serde_json::from_str(&text).context("Failed to parse LLM response as JSON")?;
-
-        debug!(
-            "Response: {}",
-            serde_json::to_string_pretty(&data).unwrap_or_default()
-        );
-
-        let choice = data["choices"]
-            .as_array()
-            .and_then(|arr| arr.first())
-            .context("No choices in response")?;
-
-        let message = &choice["message"];
-
-        if let Some(tool_calls) = message["tool_calls"].as_array() {
-            let calls: Vec<ToolCall> = tool_calls
-                .iter()
-                .map(|tc| ToolCall {
-                    id: tc["id"].as_str().unwrap_or_default().to_string(),
-                    name: tc["function"]["name"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                    arguments: serde_json::from_str(
-                        tc["function"]["arguments"].as_str().unwrap_or("{}"),
-                    )
-                    .unwrap_or_default(),
-                })
-                .collect();
-
-            Ok(ChatResponse::ToolCall(calls))
-        } else {
-            let content = message["content"].as_str().unwrap_or("").to_string();
-            Ok(ChatResponse::Text(content))
-        }
+        anyhow::bail!("{}", last_err.unwrap_or_else(|| "Unknown error".to_string()))
     }
 
     async fn chat_stream(&self, request: ChatRequest) -> Result<StreamResponse> {
@@ -179,12 +233,12 @@ impl LlmProvider for OpenAiProvider {
 
         debug!("Sending stream request to {}/chat/completions", self.base_url);
 
-        // Retry up to 3 times on transient failures
         let mut last_err = None;
         let response = {
             let mut resp = None;
-            for attempt in 0..3 {
-                match self.client
+            for attempt in 0..=MAX_RETRIES {
+                match self
+                    .client
                     .post(format!("{}/chat/completions", self.base_url))
                     .header("Authorization", format!("Bearer {}", self.api_key))
                     .header("Content-Type", "application/json")
@@ -197,18 +251,36 @@ impl LlmProvider for OpenAiProvider {
                         break;
                     }
                     Ok(r) => {
-                        let status = r.status();
+                        let status = r.status().as_u16();
                         let text = r.text().await.unwrap_or_default();
                         last_err = Some(format!("LLM API error ({}): {}", status, text));
-                        if status.as_u16() >= 500 || status.as_u16() == 429 {
-                            tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                        if attempt < MAX_RETRIES && should_retry_status(status, attempt) {
+                            let delay = backoff_delay(attempt);
+                            warn!(
+                                "chat_stream retry {}/{}: status={}, waiting {:?}",
+                                attempt + 1,
+                                MAX_RETRIES,
+                                status,
+                                delay
+                            );
+                            tokio::time::sleep(delay).await;
                             continue;
                         }
                         anyhow::bail!("LLM API error ({}): {}", status, text);
                     }
                     Err(e) => {
                         last_err = Some(format!("Request failed: {}", e));
-                        tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                        if attempt < MAX_RETRIES {
+                            let delay = backoff_delay(attempt);
+                            warn!(
+                                "chat_stream retry {}/{}: network error, waiting {:?}",
+                                attempt + 1,
+                                MAX_RETRIES,
+                                delay
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
                     }
                 }
             }
@@ -314,7 +386,6 @@ impl LlmProvider for OpenAiProvider {
                 }
             }
 
-            // Handle remaining buffer (some APIs don't send [DONE])
             // Handle remaining buffer (some APIs don't send [DONE])
             if !tool_calls.is_empty() {
                 for (id, name, args_str) in &tool_calls {

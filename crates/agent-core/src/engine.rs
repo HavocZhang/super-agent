@@ -8,6 +8,21 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
+const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024; // ~8K tokens
+
+fn truncate_tool_output(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut result = s[..end].to_string();
+    result.push_str(&format!("\n[...truncated from {} bytes]", s.len()));
+    result
+}
+
 pub struct AgentEngine {
     llm: Arc<Box<dyn LlmProvider>>,
     tools: Arc<ToolRegistry>,
@@ -132,7 +147,7 @@ impl AgentEngine {
                         self.check_permission(&tool_call.name, &tool_call.arguments)?;
                         let result = self.tools.execute(&tool_call.name, &tool_call.arguments, &wd).await;
                         let output = match result {
-                            Ok(output) => output,
+                            Ok(output) => truncate_tool_output(&output, MAX_TOOL_OUTPUT_BYTES),
                             Err(e) => format!("Error: {}", e),
                         };
                         let mut msgs = self.messages.write().await;
@@ -313,7 +328,8 @@ impl AgentEngine {
 
                         let results = tool_executor.execute_batch(&approved_calls, &wd).await;
                         for result in results {
-                            info!("Tool {} done ({} bytes)", result.name, result.output.len());
+                            let output = truncate_tool_output(&result.output, MAX_TOOL_OUTPUT_BYTES);
+                            info!("Tool {} done ({} bytes)", result.name, output.len());
 
                             // Doom loop detection
                             if last_tool_name.as_deref() == Some(&result.name) {
@@ -331,7 +347,7 @@ impl AgentEngine {
                             }
 
                             let mut msgs = messages.write().await;
-                            msgs.push(Message::tool_result(&result.tool_call_id, &result.output));
+                            msgs.push(Message::tool_result(&result.tool_call_id, &output));
                         }
 
                         info!("Tools done, continuing to next iteration");

@@ -13,3 +13,4 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }
 async-stream = { workspace = true }
+rand = "0.8"

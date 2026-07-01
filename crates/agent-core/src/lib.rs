@@ -1,6 +1,7 @@
 mod engine;
 pub mod context;
 pub mod file_diff;
+pub mod hooks;
 pub mod learning_loop;
 pub mod permissions;
 pub mod planner;
@@ -23,6 +24,7 @@ pub use session::{Session, SessionMessage, SessionStore};
 pub use skill_evolution::{Skill, SkillEvolution};
 pub use subagent::{SubagentManager, SubagentTask, SubagentType, SubagentResult};
 pub use tool_executor::{ToolExecutor, ToolResult};
+pub use hooks::{HookEvent, HookConfig, HookResult, HookExecutor};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FinishReason {
