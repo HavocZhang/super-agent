@@ -1,6 +1,7 @@
 use crate::Tool;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::time::Duration;
 
 pub struct ShellTool;
 
@@ -21,22 +22,41 @@ impl Tool for ShellTool {
                 "command": {
                     "type": "string",
                     "description": "The shell command to execute"
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Timeout in milliseconds (default 30000)"
                 }
             },
             "required": ["command"]
         })
     }
 
-    async fn execute(&self, args: &Value) -> anyhow::Result<String> {
+    async fn execute(&self, args: &Value, working_dir: &str) -> anyhow::Result<String> {
         let command = args["command"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' argument"))?;
+        let timeout_ms = args["timeout_ms"].as_u64().unwrap_or(30000);
 
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .output()
-            .await?;
+        let result = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .current_dir(working_dir)
+                .output(),
+        )
+        .await;
+
+        let output = match result {
+            Ok(inner) => inner?,
+            Err(_) => {
+                return Ok(format!(
+                    "[timeout] Command timed out after {}ms",
+                    timeout_ms
+                ));
+            }
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);

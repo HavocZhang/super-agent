@@ -31,12 +31,12 @@ impl Tool for LsTool {
         })
     }
 
-    async fn execute(&self, args: &Value) -> anyhow::Result<String> {
+    async fn execute(&self, args: &Value, working_dir: &str) -> anyhow::Result<String> {
         let path = args["path"].as_str().unwrap_or(".");
         let show_hidden = args["show_hidden"].as_bool().unwrap_or(false);
 
         let mut cmd = tokio::process::Command::new("ls");
-        cmd.arg("-la");
+        cmd.arg("-la").current_dir(working_dir);
 
         if show_hidden {
             cmd.arg("-a");

@@ -12,3 +12,4 @@ tracing = { workspace = true }
 sled = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+agent-llm = { path = "../agent-llm" }

@@ -11,3 +11,5 @@ reqwest = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+futures-util = { workspace = true }
+async-stream = { workspace = true }

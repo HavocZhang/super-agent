@@ -85,6 +85,15 @@ impl Message {
         }
     }
 
+    pub fn assistant_with_content_and_tool_calls(content: &str, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.to_string(),
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        }
+    }
+
     pub fn tool_result(tool_call_id: &str, content: &str) -> Self {
         Self {
             role: Role::Tool,

@@ -5,9 +5,21 @@ edition = "2021"
 
 [dependencies]
 tokio = { workspace = true }
+tokio-stream = "0.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+futures-util = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }
+similar = "2"
 agent-llm = { path = "../agent-llm" }
 agent-tools = { path = "../agent-tools" }
+agent-memory = { path = "../agent-memory" }
+
+[dev-dependencies]
+tempfile = "3"

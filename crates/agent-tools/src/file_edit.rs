@@ -1,6 +1,16 @@
 use crate::Tool;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::path::Path;
+
+fn resolve_path(path: &str, working_dir: &str) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        path.to_string()
+    } else {
+        Path::new(working_dir).join(path).to_string_lossy().to_string()
+    }
+}
 
 pub struct FileEditTool;
 
@@ -29,13 +39,17 @@ impl Tool for FileEditTool {
                 "new_string": {
                     "type": "string",
                     "description": "The replacement string"
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace all occurrences (default false, replaces first only)"
                 }
             },
             "required": ["path", "old_string", "new_string"]
         })
     }
 
-    async fn execute(&self, args: &Value) -> anyhow::Result<String> {
+    async fn execute(&self, args: &Value, working_dir: &str) -> anyhow::Result<String> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
@@ -45,8 +59,11 @@ impl Tool for FileEditTool {
         let new_string = args["new_string"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'new_string' argument"))?;
+        let replace_all = args["replace_all"].as_bool().unwrap_or(false);
 
-        let content = tokio::fs::read_to_string(path)
+        let resolved = resolve_path(path, working_dir);
+
+        let content = tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read '{}': {}", path, e))?;
 
@@ -57,8 +74,13 @@ impl Tool for FileEditTool {
             ));
         }
 
-        let new_content = content.replacen(old_string, new_string, 1);
-        tokio::fs::write(path, &new_content)
+        let new_content = if replace_all {
+            content.replace(old_string, new_string)
+        } else {
+            content.replacen(old_string, new_string, 1)
+        };
+
+        tokio::fs::write(&resolved, &new_content)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to write '{}': {}", path, e))?;
 

@@ -1,6 +1,16 @@
 use crate::Tool;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::path::Path;
+
+fn resolve_path(path: &str, working_dir: &str) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        path.to_string()
+    } else {
+        Path::new(working_dir).join(path).to_string_lossy().to_string()
+    }
+}
 
 pub struct FileWriteTool;
 
@@ -31,7 +41,7 @@ impl Tool for FileWriteTool {
         })
     }
 
-    async fn execute(&self, args: &Value) -> anyhow::Result<String> {
+    async fn execute(&self, args: &Value, working_dir: &str) -> anyhow::Result<String> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
@@ -39,13 +49,15 @@ impl Tool for FileWriteTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'content' argument"))?;
 
-        if let Some(parent) = std::path::Path::new(path).parent() {
+        let resolved = resolve_path(path, working_dir);
+
+        if let Some(parent) = Path::new(&resolved).parent() {
             if !parent.as_os_str().is_empty() {
                 tokio::fs::create_dir_all(parent).await?;
             }
         }
 
-        tokio::fs::write(path, content)
+        tokio::fs::write(&resolved, content.as_bytes())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to write '{}': {}", path, e))?;
 

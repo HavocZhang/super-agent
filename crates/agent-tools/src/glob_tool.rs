@@ -1,6 +1,16 @@
 use crate::Tool;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::path::Path;
+
+fn resolve_path(path: &str, working_dir: &str) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        path.to_string()
+    } else {
+        Path::new(working_dir).join(path).to_string_lossy().to_string()
+    }
+}
 
 pub struct GlobTool;
 
@@ -31,31 +41,35 @@ impl Tool for GlobTool {
         })
     }
 
-    async fn execute(&self, args: &Value) -> anyhow::Result<String> {
+    async fn execute(&self, args: &Value, working_dir: &str) -> anyhow::Result<String> {
         let pattern = args["pattern"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'pattern' argument"))?;
         let path = args["path"].as_str().unwrap_or(".");
 
-        let _full_pattern = if path.ends_with('/') {
-            format!("{}{}", path, pattern)
+        let resolved = resolve_path(path, working_dir);
+
+        let full_pattern = if resolved.ends_with('/') {
+            format!("{}{}", resolved, pattern)
         } else {
-            format!("{}/{}", path, pattern)
+            format!("{}/{}", resolved, pattern)
         };
 
-        let output = tokio::process::Command::new("find")
-            .arg(path)
-            .arg("-name")
-            .arg(pattern.replace("**/*", "*").replace("**/", ""))
-            .output()
-            .await?;
+        let paths = glob::glob(&full_pattern)
+            .map_err(|e| anyhow::anyhow!("Invalid glob pattern '{}': {}", full_pattern, e))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut results = Vec::new();
+        for entry in paths {
+            match entry {
+                Ok(p) => results.push(p.display().to_string()),
+                Err(e) => results.push(format!("Error: {}", e)),
+            }
+        }
 
-        if stdout.is_empty() {
+        if results.is_empty() {
             Ok(format!("No files found matching '{}'", pattern))
         } else {
-            Ok(stdout.to_string())
+            Ok(results.join("\n"))
         }
     }
 }
