@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn test_validate_plan_empty_title() {
         let llm: Arc<Box<dyn LlmProvider>> = Arc::new(Box::new(DummyLlm));
-        let planner = TaskPlanner::new(llm);
+        let planner = TaskPlanner::new(llm, None);
         let plan = ImplementationPlan {
             title: String::new(),
             overview: "test".to_string(),
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn test_validate_plan_circular_deps() {
         let llm: Arc<Box<dyn LlmProvider>> = Arc::new(Box::new(DummyLlm));
-        let planner = TaskPlanner::new(llm);
+        let planner = TaskPlanner::new(llm, None);
         let plan = ImplementationPlan {
             title: "Test".to_string(),
             overview: "Test".to_string(),

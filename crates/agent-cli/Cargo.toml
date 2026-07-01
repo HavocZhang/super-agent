@@ -22,3 +22,8 @@ agent-core = { path = "../agent-core" }
 chrono = { workspace = true }
 agent-llm = { path = "../agent-llm" }
 agent-tools = { path = "../agent-tools" }
+ratatui = "0.28"
+crossterm = "0.28"
+pulldown-cmark = "0.12"
+syntect = "5"
+unicode-width = "0.2"

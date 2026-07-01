@@ -296,7 +296,7 @@ async fn test_skill_evolution_basic() {
 #[tokio::test]
 async fn test_task_planner_validate() {
     let llm = Arc::new(Box::new(MockLlm) as Box<dyn LlmProvider>);
-    let planner = TaskPlanner::new(llm);
+    let planner = TaskPlanner::new(llm, None);
 
     // Empty title should be invalid
     let plan = agent_core::planner::ImplementationPlan {

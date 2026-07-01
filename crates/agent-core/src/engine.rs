@@ -173,6 +173,9 @@ impl AgentEngine {
 
         // Spawn the agent loop as a background task
         tokio::spawn(async move {
+            let mut last_tool_name: Option<String> = None;
+            let mut consecutive_same_tool: usize = 0;
+
             for iteration in 0..max_iter {
                 info!("Agent iteration {}/{}", iteration + 1, max_iter);
 
@@ -184,6 +187,16 @@ impl AgentEngine {
                         let mut msgs = messages.write().await;
                         *msgs = compacted;
                         info!("Context auto-compacted");
+                    }
+                }
+
+                // Check context overflow
+                {
+                    let msgs = messages.read().await;
+                    if context.is_critical(&msgs) {
+                        warn!("Context overflow detected");
+                        let _ = tx.send(Ok(StreamEvent::Error("Context overflow: token limit exceeded".to_string()))).await;
+                        return;
                     }
                 }
 
@@ -301,6 +314,22 @@ impl AgentEngine {
                         let results = tool_executor.execute_batch(&approved_calls, &wd).await;
                         for result in results {
                             info!("Tool {} done ({} bytes)", result.name, result.output.len());
+
+                            // Doom loop detection
+                            if last_tool_name.as_deref() == Some(&result.name) {
+                                consecutive_same_tool += 1;
+                            } else {
+                                last_tool_name = Some(result.name.clone());
+                                consecutive_same_tool = 1;
+                            }
+                            if consecutive_same_tool >= 3 {
+                                warn!("Doom loop detected: tool {} called 3 times consecutively", result.name);
+                                let _ = tx.send(Ok(StreamEvent::Error(
+                                    format!("Doom loop detected: tool {} called 3 times consecutively", result.name)
+                                ))).await;
+                                return;
+                            }
+
                             let mut msgs = messages.write().await;
                             msgs.push(Message::tool_result(&result.tool_call_id, &result.output));
                         }

@@ -1,3 +1,5 @@
+mod tui;
+
 use agent_core::{AgentConfig, AgentEngine, FileDiff, SessionMessage, SessionStore};
 use agent_llm::{OpenAiProvider, StreamEvent};
 use agent_tools::default_tools;
@@ -374,6 +376,9 @@ fn print_diff(path: &str, old: &str, new: &str) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let use_tui = args.contains(&"--tui".to_string());
+
     let config = load_config()?;
     let model = config.agent.model.clone();
 
@@ -382,13 +387,26 @@ async fn main() -> Result<()> {
     let engine = Arc::new(AgentEngine::new(llm, tools, config.agent.clone()));
 
     let mut mcp_manager = agent_tools::McpManager::new();
-    let mut file_snapshots: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     // Initialize session store
     let session_store = match SessionStore::new() {
         Ok(store) => Some(store),
         Err(_) => None,
     };
+
+    if use_tui {
+        // ── TUI mode ────────────────────────────────────────
+        let mut tui = tui::TuiApp::new(
+            engine,
+            session_store,
+            mcp_manager,
+            &model,
+            &std::env::current_dir()?.to_string_lossy(),
+        )?;
+        tui.run().await?;
+    } else {
+    // ── REPL mode ─────────────────────────────────────────
+    let mut file_snapshots: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut current_session_id = String::new();
     let mut first_user_message: Option<String> = None;
 
@@ -646,7 +664,7 @@ async fn main() -> Result<()> {
                             println!("  {} {}", yellow("Planning:"), task);
                             print_thinking();
                             let llm_prov = Arc::new(Box::new(OpenAiProvider::new(config.api_key.clone(), config.base_url.clone())) as Box<dyn agent_llm::LlmProvider>);
-                            let planner = agent_core::TaskPlanner::new(llm_prov);
+                            let planner = agent_core::TaskPlanner::new(llm_prov, Some(config.agent.model.clone()));
                             match planner.create_plan(task).await {
                                 Ok(plan) => {
                                     println!();
@@ -681,7 +699,7 @@ async fn main() -> Result<()> {
                             println!("  {} {}", yellow("Brainstorming:"), idea);
                             print_thinking();
                             let llm_prov = Arc::new(Box::new(OpenAiProvider::new(config.api_key.clone(), config.base_url.clone())) as Box<dyn agent_llm::LlmProvider>);
-                            let planner = agent_core::TaskPlanner::new(llm_prov);
+                            let planner = agent_core::TaskPlanner::new(llm_prov, Some(config.agent.model.clone()));
                             match planner.brainstorm(idea).await {
                                 Ok(result) => {
                                     println!();
@@ -868,5 +886,7 @@ async fn main() -> Result<()> {
 
     println!();
     println!("  {}", dim("Bye!"));
+    } // end REPL else
+
     Ok(())
 }
