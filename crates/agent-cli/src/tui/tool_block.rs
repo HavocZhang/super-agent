@@ -4,6 +4,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::theme;
 use crate::tui::spinner::fmt_elapsed;
@@ -66,11 +67,7 @@ impl ToolBlock {
             ToolState::Error(_) => " ✗".to_string(),
         };
 
-        let args_preview = if self.arguments.len() > 40 {
-            format!("{}…", &self.arguments[..38])
-        } else {
-            self.arguments.clone()
-        };
+        let args_preview = truncate_chars(&self.arguments, 40);
 
         let line = Line::from(vec![
             Span::styled("▸ ", Style::default().fg(color)),
@@ -158,15 +155,24 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
         return vec![text.to_string()];
     }
     let mut lines = Vec::new();
-    for line in text.lines() {
-        if line.len() <= width {
+    for line in text.split('\n') {
+        if unicode_width::UnicodeWidthStr::width(line) <= width {
             lines.push(line.to_string());
         } else {
-            let mut remaining = line;
-            while !remaining.is_empty() {
-                let end = remaining.len().min(width);
-                lines.push(remaining[..end].to_string());
-                remaining = &remaining[end..];
+            let mut current = String::new();
+            let mut current_width = 0;
+            for ch in line.chars() {
+                let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if current_width + w > width {
+                    lines.push(current);
+                    current = String::new();
+                    current_width = 0;
+                }
+                current.push(ch);
+                current_width += w;
+            }
+            if !current.is_empty() {
+                lines.push(current);
             }
         }
     }
@@ -174,4 +180,12 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
         lines.push(String::new());
     }
     lines
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max_chars.saturating_sub(1)).collect::<String>())
+    }
 }

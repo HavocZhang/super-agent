@@ -47,9 +47,17 @@ impl App {
 
     pub fn tick(&mut self) {
         self.header.tick();
-        self.spinner.tick();
         self.toasts.tick();
-        self.footer.status = self.status.clone();
+        // Update footer spinner + status
+        self.footer.set_streaming(self.spinner.is_running());
+        if self.spinner.is_running() {
+            let frame = self.spinner.tick();
+            if !frame.is_empty() {
+                self.footer.set_status(&format!("{} {}", frame, self.status));
+            }
+        } else {
+            self.footer.set_status(&self.status);
+        }
     }
 
     pub fn render(&self, frame: &mut ratatui::Frame) {
@@ -87,27 +95,49 @@ impl App {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Calculate visible portion of input
-        let input_display = format!("> {}", self.input);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
         let visible_width = inner.width as usize;
+        let prefix = "> ";
+        let cursor_char = "▏";
 
-        let display_str = if input_display.len() > visible_width {
-            let cursor_abs = 2 + self.input_cursor; // "> " prefix
-            let start = if cursor_abs > visible_width {
-                cursor_abs - visible_width
-            } else {
-                0
-            };
-            let end = (start + visible_width).min(input_display.len());
-            &input_display[start..end]
-        } else {
-            &input_display
-        };
+        // Build the full display string with cursor
+        let before: String = self.input.chars().take(self.input_cursor).collect();
+        let after: String = self.input.chars().skip(self.input_cursor).collect();
+        let full = format!("{}{}{}{}", prefix, before, cursor_char, after);
 
-        let para = Paragraph::new(Line::from(Span::styled(
-            display_str.to_string(),
-            Style::default().fg(theme::TEXT),
-        )));
+        // Truncate to fit visible width using display width (CJK safe)
+        let mut display = String::new();
+        let mut w = 0;
+        for ch in full.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+            if w + cw > visible_width {
+                break;
+            }
+            display.push(ch);
+            w += cw;
+        }
+
+        let cursor_style = Style::default().fg(theme::PRIMARY);
+        let text_style = Style::default().fg(theme::TEXT);
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Span::styled(prefix.to_string(), text_style));
+
+        // Before cursor
+        for ch in before.chars() {
+            spans.push(Span::styled(ch.to_string(), text_style));
+        }
+        // Cursor
+        spans.push(Span::styled(cursor_char.to_string(), cursor_style));
+        // After cursor
+        for ch in after.chars() {
+            spans.push(Span::styled(ch.to_string(), text_style));
+        }
+
+        let para = Paragraph::new(Line::from(spans));
         frame.render_widget(para, inner);
     }
 }

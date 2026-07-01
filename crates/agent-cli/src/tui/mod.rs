@@ -56,6 +56,22 @@ impl TuiApp {
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
+        // Init working dir in footer
+        if let Ok(cwd) = std::env::current_dir() {
+            let s = cwd.to_string_lossy().to_string();
+            if let Some(home) = dirs::home_dir() {
+                let h = home.to_string_lossy().to_string();
+                if s.starts_with(&h) {
+                    self.app.footer.set_directory(&s.replacen(&h, "~", 1));
+                } else {
+                    self.app.footer.set_directory(&s);
+                }
+            } else {
+                self.app.footer.set_directory(&s);
+            }
+        }
+        self.app.footer.set_model(&self.app.model);
+
         loop {
             self.terminal.draw(|frame| self.app.render(frame))?;
 
@@ -72,6 +88,10 @@ impl TuiApp {
                     }
                     _ => {}
                 }
+            }
+
+            if !self.app.running {
+                break;
             }
 
             self.app.tick();
@@ -160,6 +180,12 @@ impl TuiApp {
                         .unwrap_or(0);
                     self.app.input_cursor += next;
                 }
+            }
+            KeyCode::PageUp => {
+                self.app.messages.scroll_up(10);
+            }
+            KeyCode::PageDown => {
+                self.app.messages.scroll_down(10);
             }
             KeyCode::Home => self.app.input_cursor = 0,
             KeyCode::End => self.app.input_cursor = self.app.input.len(),
