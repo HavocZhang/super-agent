@@ -9,6 +9,51 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::theme;
 use crate::tui::spinner::fmt_elapsed;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolFamily {
+    Read,
+    Patch,
+    Run,
+    Find,
+    Delegate,
+    Think,
+    Generic,
+}
+
+pub fn tool_family_for_name(name: &str) -> ToolFamily {
+    match name {
+        "file_read" | "ls" => ToolFamily::Read,
+        "file_write" | "file_edit" => ToolFamily::Patch,
+        "shell" | "git_commit" | "git_diff" | "git_status" => ToolFamily::Run,
+        "grep" | "glob" | "web_search" => ToolFamily::Find,
+        _ => ToolFamily::Generic,
+    }
+}
+
+pub fn family_glyph(family: ToolFamily) -> &'static str {
+    match family {
+        ToolFamily::Read => "▷",
+        ToolFamily::Patch => "◆",
+        ToolFamily::Run => "▶",
+        ToolFamily::Find => "⌕",
+        ToolFamily::Delegate => "◐",
+        ToolFamily::Think => "…",
+        ToolFamily::Generic => "•",
+    }
+}
+
+pub fn family_label(family: ToolFamily) -> &'static str {
+    match family {
+        ToolFamily::Read => "read",
+        ToolFamily::Patch => "patch",
+        ToolFamily::Run => "run",
+        ToolFamily::Find => "find",
+        ToolFamily::Delegate => "delegate",
+        ToolFamily::Think => "think",
+        ToolFamily::Generic => "tool",
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ToolState {
     Running,

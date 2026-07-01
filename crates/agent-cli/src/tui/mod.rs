@@ -3,6 +3,7 @@ pub mod approval;
 pub mod component;
 pub mod footer;
 pub mod header;
+pub mod line_buffer;
 pub mod markdown;
 pub mod messages;
 pub mod spinner;
@@ -21,6 +22,30 @@ use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(8);
+
+struct FrameRateLimiter {
+    last_draw: Option<Instant>,
+}
+
+impl FrameRateLimiter {
+    fn new() -> Self {
+        Self { last_draw: None }
+    }
+
+    fn should_draw(&mut self) -> bool {
+        let now = Instant::now();
+        if let Some(last) = self.last_draw {
+            if now.duration_since(last) < MIN_FRAME_INTERVAL {
+                return false;
+            }
+        }
+        self.last_draw = Some(now);
+        true
+    }
+}
 
 pub struct TuiApp {
     terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
@@ -29,6 +54,8 @@ pub struct TuiApp {
     session_store: Option<SessionStore>,
     current_session_id: String,
     _mcp_manager: McpManager,
+    limiter: FrameRateLimiter,
+    needs_redraw: bool,
 }
 
 impl TuiApp {
@@ -52,6 +79,8 @@ impl TuiApp {
             session_store,
             current_session_id: String::new(),
             _mcp_manager: mcp_manager,
+            limiter: FrameRateLimiter::new(),
+            needs_redraw: true,
         })
     }
 
@@ -73,11 +102,15 @@ impl TuiApp {
         self.app.footer.set_model(&self.app.model);
 
         loop {
-            self.terminal.draw(|frame| self.app.render(frame))?;
+            if self.needs_redraw && self.limiter.should_draw() {
+                self.terminal.draw(|frame| self.app.render(frame))?;
+                self.needs_redraw = false;
+            }
 
-            if event::poll(std::time::Duration::from_millis(16))? {
+            if event::poll(Duration::from_millis(8))? {
                 match event::read()? {
                     Event::Key(key) => {
+                        self.needs_redraw = true;
                         if self.handle_key(key).await? {
                             break;
                         }
@@ -85,6 +118,7 @@ impl TuiApp {
                     Event::Paste(data) => {
                         self.app.input.push_str(&data);
                         self.app.input_cursor = self.app.input.len();
+                        self.needs_redraw = true;
                     }
                     _ => {}
                 }
@@ -221,12 +255,12 @@ impl TuiApp {
                     } else {
                         self.app.messages.push_assistant(&token);
                     }
-                    self.terminal.draw(|frame| self.app.render(frame))?;
+                    self.needs_redraw = true;
                 }
                 Ok(StreamEvent::ToolCallStart { ref name, .. }) => {
                     use crate::tui::tool_block::ToolBlock;
                     self.app.messages.push_tool(ToolBlock::new(name, ""));
-                    self.terminal.draw(|frame| self.app.render(frame))?;
+                    self.needs_redraw = true;
                 }
                 Ok(StreamEvent::ToolSnapshot { path, content }) => {
                     tool_snapshots.push((path, content));

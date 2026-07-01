@@ -32,6 +32,18 @@ pub fn tool_color(tool_name: &str) -> Color {
     }
 }
 
+pub fn family_color(family: crate::tui::tool_block::ToolFamily) -> Color {
+    match family {
+        crate::tui::tool_block::ToolFamily::Read => Color::Magenta,
+        crate::tui::tool_block::ToolFamily::Patch => Color::Yellow,
+        crate::tui::tool_block::ToolFamily::Run => Color::Cyan,
+        crate::tui::tool_block::ToolFamily::Find => Color::Blue,
+        crate::tui::tool_block::ToolFamily::Delegate => Color::Green,
+        crate::tui::tool_block::ToolFamily::Think => Color::DarkGray,
+        crate::tui::tool_block::ToolFamily::Generic => Color::DarkGray,
+    }
+}
+
 pub fn context_bar_color(pct: u8) -> Color {
     if pct >= 95 {
         ERROR

@@ -1,7 +1,9 @@
+use std::cell::RefCell;
+
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::tui::markdown::MarkdownRenderer;
@@ -13,6 +15,10 @@ pub struct MessagesArea {
     scroll_offset: usize,
     auto_scroll: bool,
     markdown: MarkdownRenderer,
+    cached_lines: RefCell<Vec<Line<'static>>>,
+    cache_valid: RefCell<bool>,
+    revisions: Vec<u64>,
+    current_revision: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -31,11 +37,22 @@ impl MessagesArea {
             scroll_offset: 0,
             auto_scroll: true,
             markdown: MarkdownRenderer::new(),
+            cached_lines: RefCell::new(Vec::new()),
+            cache_valid: RefCell::new(false),
+            revisions: Vec::new(),
+            current_revision: 0,
         }
+    }
+
+    fn invalidate_cache(&mut self) {
+        self.current_revision += 1;
+        *self.cache_valid.borrow_mut() = false;
     }
 
     pub fn push_user(&mut self, text: &str) {
         self.messages.push(ChatMessage::User(text.to_string()));
+        self.revisions.push(self.current_revision);
+        self.invalidate_cache();
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -43,6 +60,8 @@ impl MessagesArea {
 
     pub fn push_assistant(&mut self, text: &str) {
         self.messages.push(ChatMessage::Assistant(text.to_string()));
+        self.revisions.push(self.current_revision);
+        self.invalidate_cache();
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -50,6 +69,8 @@ impl MessagesArea {
 
     pub fn push_tool(&mut self, block: ToolBlock) {
         self.messages.push(ChatMessage::ToolCall(block));
+        self.revisions.push(self.current_revision);
+        self.invalidate_cache();
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -57,6 +78,8 @@ impl MessagesArea {
 
     pub fn push_system(&mut self, text: &str) {
         self.messages.push(ChatMessage::System(text.to_string()));
+        self.revisions.push(self.current_revision);
+        self.invalidate_cache();
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -64,6 +87,8 @@ impl MessagesArea {
 
     pub fn push_error(&mut self, text: &str) {
         self.messages.push(ChatMessage::Error(text.to_string()));
+        self.revisions.push(self.current_revision);
+        self.invalidate_cache();
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -84,11 +109,14 @@ impl MessagesArea {
                 }
                 _ => {
                     self.messages.push(ChatMessage::Assistant(text.to_string()));
+                    self.revisions.push(self.current_revision);
                 }
             }
         } else {
             self.messages.push(ChatMessage::Assistant(text.to_string()));
+            self.revisions.push(self.current_revision);
         }
+        self.invalidate_cache();
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -96,15 +124,27 @@ impl MessagesArea {
 
     pub fn clear(&mut self) {
         self.messages.clear();
+        self.revisions.clear();
+        self.current_revision = 0;
+        *self.cached_lines.borrow_mut() = Vec::new();
+        *self.cache_valid.borrow_mut() = false;
         self.scroll_offset = 0;
         self.auto_scroll = true;
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let all_lines = self.collect_lines(area.width);
+        let bg = Block::default().style(Style::default().bg(theme::SURFACE));
+        frame.render_widget(bg, area);
+
+        if !*self.cache_valid.borrow() {
+            *self.cached_lines.borrow_mut() = self.collect_lines(area.width);
+            *self.cache_valid.borrow_mut() = true;
+        }
+
+        let cached = self.cached_lines.borrow();
         let visible_height = area.height as usize;
 
-        let total_lines = all_lines.len();
+        let total_lines = cached.len();
         let max_scroll = total_lines.saturating_sub(visible_height);
 
         let scroll = if self.auto_scroll {
@@ -115,7 +155,7 @@ impl MessagesArea {
 
         let start = max_scroll.saturating_sub(scroll);
         let end = (start + visible_height).min(total_lines);
-        let visible: Vec<Line<'static>> = all_lines[start..end].to_vec();
+        let visible: Vec<Line<'static>> = cached[start..end].to_vec();
 
         let para = Paragraph::new(Text::from(visible));
         frame.render_widget(para, area);
@@ -128,7 +168,6 @@ impl MessagesArea {
         for msg in &self.messages {
             match msg {
                 ChatMessage::User(text) => {
-                    // Wrap user messages at content_width
                     let wrapped = wrap_text(text, content_width.saturating_sub(2));
                     for (i, line_text) in wrapped.iter().enumerate() {
                         let prefix = if i == 0 { "┃ " } else { "  " };
@@ -201,17 +240,10 @@ impl MessagesArea {
         block: &ToolBlock,
         content_width: usize,
     ) {
-        let display = match block.name.as_str() {
-            "file_read" => "Read File",
-            "file_write" => "Write File",
-            "file_edit" => "Edit File",
-            "shell" => "Run Command",
-            "grep" => "Search",
-            "glob" => "Find Files",
-            "ls" => "List Directory",
-            _ => block.name.as_str(),
-        };
-        let color = theme::tool_color(&block.name);
+        let family = crate::tui::tool_block::tool_family_for_name(&block.name);
+        let glyph = crate::tui::tool_block::family_glyph(family);
+        let label = crate::tui::tool_block::family_label(family);
+        let color = theme::family_color(family);
 
         if block.collapsed {
             let status = match &block.state {
@@ -228,7 +260,6 @@ impl MessagesArea {
                 _ => theme::SPINNER,
             };
 
-            // Truncate arguments by char count (CJK safe)
             let args_preview = if block.arguments.chars().count() > 40 {
                 format!("{}…", block.arguments.chars().take(39).collect::<String>())
             } else {
@@ -236,30 +267,27 @@ impl MessagesArea {
             };
 
             lines.push(Line::from(vec![
-                Span::styled("  ▸ ", Style::default().fg(color)),
                 Span::styled(
-                    display.to_string(),
+                    format!("  {} {}: ", glyph, label),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(": "),
                 Span::styled(args_preview, Style::default().fg(theme::TEXT_DIM)),
                 Span::styled(status, Style::default().fg(status_color)),
             ]));
         } else {
-            // Expanded tool block - use actual content width
+            let header = format!("{} {} ", glyph, label);
             let border_w = content_width.saturating_sub(4).min(60);
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("  ┌─ {} ", display),
+                    format!("  ┌─ {}", header),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    "─".repeat(border_w.saturating_sub(display.len() + 4)),
+                    "─".repeat(border_w.saturating_sub(header.len() + 4)),
                     Style::default().fg(color),
                 ),
             ]));
 
-            // Arguments
             let arg_width = content_width.saturating_sub(6);
             for arg_line in wrap_text(&block.arguments, arg_width) {
                 lines.push(Line::from(vec![
@@ -268,7 +296,6 @@ impl MessagesArea {
                 ]));
             }
 
-            // Output
             if !block.output.is_empty() {
                 let output_text: String = block.output.chars().take(500).collect();
                 for out_line in wrap_text(&output_text, arg_width) {
@@ -285,7 +312,6 @@ impl MessagesArea {
                 }
             }
 
-            // Error
             if let crate::tui::tool_block::ToolState::Error(ref err) = block.state {
                 for err_line in wrap_text(err, arg_width) {
                     lines.push(Line::from(vec![
@@ -295,7 +321,6 @@ impl MessagesArea {
                 }
             }
 
-            // Footer
             let (status_icon, status_color, duration) = match &block.state {
                 crate::tui::tool_block::ToolState::Running => ("⏳", theme::SPINNER, String::new()),
                 crate::tui::tool_block::ToolState::Success(d) => {
@@ -306,7 +331,7 @@ impl MessagesArea {
 
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("  └─ {}{} ", status_icon, duration),
+                    format!("  ╰── {}{} ", status_icon, duration),
                     Style::default().fg(status_color),
                 ),
             ]));
