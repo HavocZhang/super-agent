@@ -3,3 +3,4 @@
 *.swo
 *~
 .env
+virtual_dom/
