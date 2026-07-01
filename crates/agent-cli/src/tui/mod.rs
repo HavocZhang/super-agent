@@ -56,6 +56,7 @@ pub struct TuiApp {
     _mcp_manager: McpManager,
     limiter: FrameRateLimiter,
     needs_redraw: bool,
+    tool_start_time: Option<Instant>,
 }
 
 impl TuiApp {
@@ -81,6 +82,7 @@ impl TuiApp {
             _mcp_manager: mcp_manager,
             limiter: FrameRateLimiter::new(),
             needs_redraw: true,
+            tool_start_time: None,
         })
     }
 
@@ -260,6 +262,27 @@ impl TuiApp {
                 Ok(StreamEvent::ToolCallStart { ref name, .. }) => {
                     use crate::tui::tool_block::ToolBlock;
                     self.app.messages.push_tool(ToolBlock::new(name, ""));
+                    self.needs_redraw = true;
+                }
+                Ok(StreamEvent::ToolCallEnd { ref name, ref arguments, .. }) => {
+                    // Update the last tool block with arguments
+                    let args_str = if arguments.is_string() {
+                        arguments.as_str().unwrap_or("").to_string()
+                    } else if arguments.is_object() || arguments.is_array() {
+                        serde_json::to_string_pretty(arguments).unwrap_or_default()
+                    } else {
+                        arguments.to_string()
+                    };
+                    self.app.messages.update_last_tool_args(&args_str);
+                    self.tool_start_time = Some(std::time::Instant::now());
+                    self.needs_redraw = true;
+                }
+                Ok(StreamEvent::ToolResult { ref name, ref output, .. }) => {
+                    // Update the last tool block with output and mark as done
+                    let duration = self.tool_start_time.take()
+                        .map(|t| t.elapsed())
+                        .unwrap_or_default();
+                    self.app.messages.finish_last_tool(output, duration);
                     self.needs_redraw = true;
                 }
                 Ok(StreamEvent::ToolSnapshot { path, content }) => {

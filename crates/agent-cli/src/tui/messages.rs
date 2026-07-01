@@ -76,6 +76,34 @@ impl MessagesArea {
         }
     }
 
+    pub fn update_last_tool_args(&mut self, args: &str) {
+        if let Some(last) = self.messages.last_mut() {
+            if let ChatMessage::ToolCall(ref mut block) = last {
+                block.arguments = args.to_string();
+                self.invalidate_cache();
+            }
+        }
+    }
+
+    pub fn finish_last_tool(&mut self, output: &str, duration: std::time::Duration) {
+        if let Some(last) = self.messages.last_mut() {
+            if let ChatMessage::ToolCall(ref mut block) = last {
+                block.output = output.to_string();
+                block.state = crate::tui::tool_block::ToolState::Success(duration);
+                self.invalidate_cache();
+            }
+        }
+    }
+
+    pub fn mark_last_tool_error(&mut self, error: &str) {
+        if let Some(last) = self.messages.last_mut() {
+            if let ChatMessage::ToolCall(ref mut block) = last {
+                block.state = crate::tui::tool_block::ToolState::Error(error.to_string());
+                self.invalidate_cache();
+            }
+        }
+    }
+
     pub fn push_system(&mut self, text: &str) {
         self.messages.push(ChatMessage::System(text.to_string()));
         self.revisions.push(self.current_revision);

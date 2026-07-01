@@ -327,6 +327,7 @@ impl AgentEngine {
                         }
 
                         let results = tool_executor.execute_batch(&approved_calls, &wd).await;
+                        let mut doom_loop_hit = false;
                         for result in results {
                             let output = truncate_tool_output(&result.output, MAX_TOOL_OUTPUT_BYTES);
                             info!("Tool {} done ({} bytes)", result.name, output.len());
@@ -338,16 +339,31 @@ impl AgentEngine {
                                 last_tool_name = Some(result.name.clone());
                                 consecutive_same_tool = 1;
                             }
+
+                            // Send tool result to TUI
+                            let _ = tx.send(Ok(StreamEvent::ToolResult {
+                                id: result.tool_call_id.clone(),
+                                name: result.name.clone(),
+                                output: output.clone(),
+                            })).await;
+
+                            {
+                                let mut msgs = messages.write().await;
+                                msgs.push(Message::tool_result(&result.tool_call_id, &output));
+                            }
+
                             if consecutive_same_tool >= 3 {
                                 warn!("Doom loop detected: tool {} called 3 times consecutively", result.name);
+                                doom_loop_hit = true;
                                 let _ = tx.send(Ok(StreamEvent::Error(
                                     format!("Doom loop detected: tool {} called 3 times consecutively", result.name)
                                 ))).await;
-                                return;
+                                break;
                             }
+                        }
 
-                            let mut msgs = messages.write().await;
-                            msgs.push(Message::tool_result(&result.tool_call_id, &output));
+                        if doom_loop_hit {
+                            return;
                         }
 
                         info!("Tools done, continuing to next iteration");

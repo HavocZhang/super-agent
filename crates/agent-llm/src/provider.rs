@@ -14,6 +14,8 @@ pub enum StreamEvent {
     /// Snapshot of a file's content BEFORE a write/edit tool executes.
     /// The CLI can use this to compute diffs after the tool completes.
     ToolSnapshot { path: String, content: String },
+    /// Tool execution output sent back to the UI.
+    ToolResult { id: String, name: String, output: String },
     Done,
     Error(String),
 }
