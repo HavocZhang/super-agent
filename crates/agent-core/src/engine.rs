@@ -283,7 +283,22 @@ impl AgentEngine {
                     }
                 };
 
-                let stream_result = llm.chat_stream(request).await;
+                // LLM call with timeout to prevent hanging
+                let stream_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    llm.chat_stream(request),
+                ).await;
+
+                let stream_result = match stream_result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("LLM call timed out after 120s");
+                        let _ = tx.send(Ok(StreamEvent::Error(
+                            "LLM call timed out after 120 seconds".to_string()
+                        ))).await;
+                        return;
+                    }
+                };
 
                 match stream_result {
                     Ok(mut stream) => {
