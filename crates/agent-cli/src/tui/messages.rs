@@ -171,16 +171,23 @@ impl MessagesArea {
 
         let cached = self.cached_lines.borrow();
         let visible_height = area.height as usize;
-
         let total_lines = cached.len();
-        let max_scroll = total_lines.saturating_sub(visible_height);
 
+        if total_lines == 0 {
+            let empty = Paragraph::new(Text::from(vec![Line::from(Span::styled(
+                "  Ready — type a message to begin.",
+                Style::default().fg(theme::TEXT_DIM),
+            ))]));
+            frame.render_widget(empty, area);
+            return;
+        }
+
+        let max_scroll = total_lines.saturating_sub(visible_height);
         let scroll = if self.auto_scroll {
             0
         } else {
             self.scroll_offset.min(max_scroll)
         };
-
         let start = max_scroll.saturating_sub(scroll);
         let end = (start + visible_height).min(total_lines);
         let visible: Vec<Line<'static>> = cached[start..end].to_vec();
@@ -192,8 +199,13 @@ impl MessagesArea {
     fn collect_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let content_width = width.saturating_sub(2) as usize;
+        let total_msgs = self.messages.len();
 
-        for msg in &self.messages {
+        // Only render last MAX_RENDER_MESSAGES to avoid freezing on huge sessions
+        const MAX_RENDER_MESSAGES: usize = 200;
+        let start_msg = total_msgs.saturating_sub(MAX_RENDER_MESSAGES);
+
+        for msg in &self.messages[start_msg..] {
             match msg {
                 ChatMessage::User(text) => {
                     let wrapped = wrap_text(text, content_width.saturating_sub(2));

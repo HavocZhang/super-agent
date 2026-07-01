@@ -267,7 +267,50 @@ impl TuiApp {
         let _ = self.terminal.draw(|frame| self.app.render(frame));
 
         tokio::pin!(stream);
-        while let Some(event) = stream.next().await {
+        loop {
+            // Poll for mouse/key events between stream events (non-blocking)
+            while crossterm::event::poll(std::time::Duration::ZERO)? {
+                match crossterm::event::read()? {
+                    crossterm::event::Event::Mouse(mouse) => {
+                        use crossterm::event::MouseEventKind;
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                self.app.messages.scroll_up(3);
+                                let _ = self.terminal.draw(|frame| self.app.render(frame));
+                            }
+                            MouseEventKind::ScrollDown => {
+                                self.app.messages.scroll_down(3);
+                                let _ = self.terminal.draw(|frame| self.app.render(frame));
+                            }
+                            _ => {}
+                        }
+                    }
+                    crossterm::event::Event::Key(key) => {
+                        // Ctrl+C during streaming = abort
+                        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                            break;
+                        }
+                        // Esc during streaming = stop spinner but let stream finish
+                        if key.code == KeyCode::Esc {
+                            self.app.spinner.stop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Try to get next stream event (with timeout so we can poll input)
+            let next_event = tokio::time::timeout(
+                std::time::Duration::from_millis(16),
+                stream.next()
+            ).await;
+
+            let event = match next_event {
+                Ok(Some(event)) => event,
+                Ok(None) => break,       // Stream ended
+                Err(_) => continue,      // Timeout — loop back to poll mouse events
+            };
+
             match event {
                 Ok(StreamEvent::Token(token)) => {
                     agent_response.push_str(&token);
