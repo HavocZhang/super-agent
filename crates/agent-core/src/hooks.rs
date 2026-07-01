@@ -241,17 +241,12 @@ mod tests {
         let mut exec = HookExecutor::new();
         exec.add_hook(HookConfig {
             event: HookEvent::PreToolUse,
-            command: "kill -KILL $$".to_string(),
+            command: "exec kill -ABRT $$".to_string(),
             timeout_ms: 5000,
             blocking: true,
         });
         let result = exec.execute(HookEvent::PreToolUse, &serde_json::json!({})).await;
-        // Signal-killed process returns None exit code → Error, or may return Warn on some platforms
-        assert!(
-            matches!(result, HookResult::Error(_)) || matches!(result, HookResult::Warn(_)),
-            "Expected Error or Warn, got: {:?}",
-            result
-        );
+        assert_eq!(result, HookResult::Error("Hook terminated by signal".to_string()));
     }
 
     #[tokio::test]

@@ -69,7 +69,7 @@ impl TuiApp {
     ) -> anyhow::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = std::io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, crossterm::event::EnableMouseCapture)?;
         let backend = ratatui::backend::CrosstermBackend::new(stdout);
         let terminal = ratatui::Terminal::new(backend)?;
 
@@ -121,6 +121,20 @@ impl TuiApp {
                         self.app.input.push_str(&data);
                         self.app.input_cursor = self.app.input.len();
                         self.needs_redraw = true;
+                    }
+                    Event::Mouse(mouse) => {
+                        use crossterm::event::MouseEventKind;
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                self.app.messages.scroll_up(3);
+                                self.needs_redraw = true;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                self.app.messages.scroll_down(3);
+                                self.needs_redraw = true;
+                            }
+                            _ => {}
+                        }
                     }
                     _ => {}
                 }
@@ -246,6 +260,11 @@ impl TuiApp {
         let stream = self.engine.run_stream(&expanded).await;
         let mut agent_response = String::new();
         let mut tool_snapshots: Vec<(String, String)> = Vec::new();
+        let mut last_draw = std::time::Instant::now();
+        let draw_interval = std::time::Duration::from_millis(16); // ~60 FPS during streaming
+
+        // Draw immediately to show spinner
+        let _ = self.terminal.draw(|frame| self.app.render(frame));
 
         tokio::pin!(stream);
         while let Some(event) = stream.next().await {
@@ -257,15 +276,20 @@ impl TuiApp {
                     } else {
                         self.app.messages.push_assistant(&token);
                     }
-                    self.needs_redraw = true;
+                    // Draw immediately for streaming tokens (throttled to ~60 FPS)
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_draw) >= draw_interval {
+                        let _ = self.terminal.draw(|frame| self.app.render(frame));
+                        last_draw = now;
+                    }
                 }
                 Ok(StreamEvent::ToolCallStart { ref name, .. }) => {
                     use crate::tui::tool_block::ToolBlock;
                     self.app.messages.push_tool(ToolBlock::new(name, ""));
-                    self.needs_redraw = true;
+                    let _ = self.terminal.draw(|frame| self.app.render(frame));
+                    last_draw = std::time::Instant::now();
                 }
                 Ok(StreamEvent::ToolCallEnd { ref name, ref arguments, .. }) => {
-                    // Update the last tool block with arguments
                     let args_str = if arguments.is_string() {
                         arguments.as_str().unwrap_or("").to_string()
                     } else if arguments.is_object() || arguments.is_array() {
@@ -275,15 +299,16 @@ impl TuiApp {
                     };
                     self.app.messages.update_last_tool_args(&args_str);
                     self.tool_start_time = Some(std::time::Instant::now());
-                    self.needs_redraw = true;
+                    let _ = self.terminal.draw(|frame| self.app.render(frame));
+                    last_draw = std::time::Instant::now();
                 }
                 Ok(StreamEvent::ToolResult { ref name, ref output, .. }) => {
-                    // Update the last tool block with output and mark as done
                     let duration = self.tool_start_time.take()
                         .map(|t| t.elapsed())
                         .unwrap_or_default();
                     self.app.messages.finish_last_tool(output, duration);
-                    self.needs_redraw = true;
+                    let _ = self.terminal.draw(|frame| self.app.render(frame));
+                    last_draw = std::time::Instant::now();
                 }
                 Ok(StreamEvent::ToolSnapshot { path, content }) => {
                     tool_snapshots.push((path, content));
@@ -382,7 +407,8 @@ impl Drop for TuiApp {
         let _ = execute!(
             std::io::stdout(),
             LeaveAlternateScreen,
-            DisableBracketedPaste
+            DisableBracketedPaste,
+            crossterm::event::DisableMouseCapture
         );
     }
 }
