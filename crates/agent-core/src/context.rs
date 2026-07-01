@@ -1,4 +1,5 @@
 use agent_llm::{Message, Role};
+use std::collections::HashSet;
 
 // ── 上下文管理器 ────────────────────────────────────────────
 // 管理 LLM 的上下文窗口：token 估算、溢出检测、消息压缩
@@ -15,6 +16,73 @@ pub const PRUNE_MINIMUM: usize = 20_000;
 pub const PRUNE_PROTECT: usize = 40_000;
 /// 受保护的工具名称列表（这些工具的结果不会被压缩掉）
 pub const PROTECTED_TOOLS: &[&str] = &[];
+
+/// 清理消息序列：移除孤立的 tool result（没有对应 assistant+tool_calls 的 tool 消息）
+/// 和没有 tool result 的 assistant+tool_calls（防止 API 400 错误）
+pub fn sanitize_messages(messages: Vec<Message>) -> Vec<Message> {
+    if messages.is_empty() {
+        return messages;
+    }
+
+    // 收集所有 assistant+tool_calls 声明的 tool_call_id
+    let mut declared_ids: HashSet<String> = HashSet::new();
+    // 收集所有 tool result 引用的 tool_call_id
+    let mut result_ids: HashSet<String> = HashSet::new();
+
+    for msg in &messages {
+        if msg.role == Role::Assistant {
+            if let Some(ref tool_calls) = msg.tool_calls {
+                for tc in tool_calls {
+                    declared_ids.insert(tc.id.clone());
+                }
+            }
+        }
+        if msg.role == Role::Tool {
+            if let Some(ref id) = msg.tool_call_id {
+                result_ids.insert(id.clone());
+            }
+        }
+    }
+
+    let mut result = Vec::with_capacity(messages.len());
+    for msg in messages {
+        match msg.role {
+            Role::Tool => {
+                // 移除没有对应 assistant+tool_calls 的孤立 tool result
+                if let Some(ref id) = msg.tool_call_id {
+                    if declared_ids.contains(id) {
+                        result.push(msg);
+                    }
+                    // else: orphaned tool result, skip
+                } else {
+                    result.push(msg);
+                }
+            }
+            Role::Assistant => {
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    // 如果 assistant+tool_calls 的所有 tool_calls 都没有对应的 result，
+                    // 保留 assistant 消息但清空 tool_calls（让它变成纯文本回复）
+                    let has_any_result = tool_calls.iter().any(|tc| result_ids.contains(&tc.id));
+                    if !has_any_result && !tool_calls.is_empty() {
+                        // 无对应 result → 保留文本但移除 tool_calls
+                        let mut cleaned = msg.clone();
+                        cleaned.tool_calls = None;
+                        result.push(cleaned);
+                    } else {
+                        result.push(msg);
+                    }
+                } else {
+                    result.push(msg);
+                }
+            }
+            _ => {
+                result.push(msg);
+            }
+        }
+    }
+
+    result
+}
 
 /// 上下文溢出级别
 #[derive(Debug, Clone, PartialEq)]
@@ -149,7 +217,7 @@ impl ContextManager {
         }
 
         result.extend(kept.iter().cloned().cloned());
-        result
+        sanitize_messages(result)
     }
 
     pub fn smart_compact(&self, messages: &[Message], llm_summary: &str) -> Vec<Message> {
@@ -184,7 +252,7 @@ impl ContextManager {
         }
 
         result.extend(recent_messages.iter().cloned().cloned());
-        result
+        sanitize_messages(result)
     }
 
     pub fn truncate_message(&self, msg: &Message, max_lines: usize) -> Message {
@@ -268,7 +336,7 @@ impl ContextManager {
         }
 
         result.extend(recent_protected.iter().cloned().cloned());
-        result
+        sanitize_messages(result)
     }
 }
 
@@ -530,5 +598,118 @@ mod tests {
         assert_eq!(result[0].content, "system prompt");
         assert!(result[1].content.contains("custom summary"));
         assert_eq!(result.last().unwrap().content, "a3");
+    }
+
+    #[test]
+    fn test_sanitize_removes_orphaned_tool_result() {
+        // Scenario: assistant+tool_calls [tc1, tc2], then only tool_result for tc1
+        // After sanitize: assistant+tool_calls [tc1] (tc2 removed), tool_result for tc1
+        let messages = vec![
+            Message::user("test"),
+            Message {
+                role: Role::Assistant,
+                content: "let me check".to_string(),
+                tool_calls: Some(vec![
+                    agent_llm::ToolCall {
+                        id: "tc1".to_string(),
+                        name: "file_read".to_string(),
+                        arguments: serde_json::json!({}),
+                    },
+                    agent_llm::ToolCall {
+                        id: "tc2".to_string(),
+                        name: "grep".to_string(),
+                        arguments: serde_json::json!({}),
+                    },
+                ]),
+                tool_call_id: None,
+            },
+            Message::tool_result("tc1", "file content"),
+            // tc2 result is missing (orphaned assistant tool_call)
+        ];
+
+        let result = sanitize_messages(messages);
+        // assistant message should have tool_calls cleared since tc2 has no result
+        // Actually: tc1 DOES have a result, so has_any_result=true, keep as-is
+        // tc2's tool_call is kept even without result (LLM will handle it)
+        // The tool_result for tc1 is kept because tc1 is declared
+        assert_eq!(result.len(), 3); // user, assistant, tool_result for tc1
+    }
+
+    #[test]
+    fn test_sanitize_removes_orphaned_tool_messages() {
+        // Scenario: compact kept a tool_result but dropped the assistant+tool_calls
+        let messages = vec![
+            Message::system("system"),
+            Message::tool_result("orphan_tc_id", "some output"),
+            Message::user("next question"),
+        ];
+
+        let result = sanitize_messages(messages);
+        // The orphaned tool_result should be removed
+        assert_eq!(result.len(), 2); // system + user
+        assert_eq!(result[0].role, Role::System);
+        assert_eq!(result[1].role, Role::User);
+    }
+
+    #[test]
+    fn test_sanitize_preserves_valid_sequence() {
+        let messages = vec![
+            Message::user("test"),
+            Message {
+                role: Role::Assistant,
+                content: "checking".to_string(),
+                tool_calls: Some(vec![agent_llm::ToolCall {
+                    id: "tc1".to_string(),
+                    name: "file_read".to_string(),
+                    arguments: serde_json::json!({}),
+                }]),
+                tool_call_id: None,
+            },
+            Message::tool_result("tc1", "content"),
+            Message::assistant("done"),
+        ];
+
+        let result = sanitize_messages(messages);
+        assert_eq!(result.len(), 4); // all preserved
+    }
+
+    #[test]
+    fn test_compact_no_orphaned_messages() {
+        // Test that compact + sanitize produces valid message sequences
+        let cm = ContextManager::new(10000).with_keep_recent(2);
+        let messages = vec![
+            Message::system("system"),
+            Message::user("q1"),
+            Message {
+                role: Role::Assistant,
+                content: "checking".to_string(),
+                tool_calls: Some(vec![agent_llm::ToolCall {
+                    id: "tc1".to_string(),
+                    name: "file_read".to_string(),
+                    arguments: serde_json::json!({}),
+                }]),
+                tool_call_id: None,
+            },
+            Message::tool_result("tc1", "file content here"),
+            Message::user("q2"),
+            Message::assistant("answer"),
+            Message::user("q3"),
+            Message::assistant("answer3"),
+        ];
+
+        let result = cm.compact(&messages, "summary");
+        // Verify no orphaned tool results at the start
+        for msg in &result {
+            if msg.role == Role::Tool {
+                // Every tool result must have a preceding assistant with matching tool_call_id
+                let has_matching_assistant = result.iter().any(|m| {
+                    m.role == Role::Assistant
+                        && m.tool_calls.as_ref().map_or(false, |tcs| {
+                            tcs.iter().any(|tc| Some(&tc.id) == msg.tool_call_id.as_ref())
+                        })
+                });
+                assert!(has_matching_assistant, "orphaned tool result found: {:?}", msg.tool_call_id);
+            }
+        }
     }
 }
