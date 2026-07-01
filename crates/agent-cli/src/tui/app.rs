@@ -51,19 +51,26 @@ impl App {
         }
     }
 
-    pub fn tick(&mut self) {
+    /// Returns true if the UI needs to be redrawn (spinner advanced, etc.)
+    pub fn tick(&mut self) -> bool {
         self.header.tick();
         self.toasts.tick();
+        let mut dirty = false;
+
         // Update footer spinner + status
-        self.footer.set_streaming(self.spinner.is_running());
-        if self.spinner.is_running() {
+        let streaming = self.spinner.is_running();
+        self.footer.set_streaming(streaming);
+        if streaming {
             let frame = self.spinner.tick();
             if !frame.is_empty() {
                 self.footer.set_status(&format!("{} {}", frame, self.status));
+                dirty = true; // spinner frame changed → need redraw
             }
         } else {
             self.footer.set_status(&self.status);
         }
+
+        dirty
     }
 
     pub fn render(&self, frame: &mut ratatui::Frame) {

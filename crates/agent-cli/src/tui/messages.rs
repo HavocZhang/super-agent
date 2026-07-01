@@ -15,8 +15,10 @@ pub struct MessagesArea {
     pub(crate) scroll_offset: usize,
     pub(crate) auto_scroll: bool,
     markdown: MarkdownRenderer,
-    cached_lines: RefCell<Vec<Line<'static>>>,
-    cache_valid: RefCell<bool>,
+    /// Cached rendered lines for messages[0..n-1] — everything except the last message.
+    /// When append_to_last() is called, this stays valid (only last message changes).
+    prefix_lines: RefCell<Vec<Line<'static>>>,
+    prefix_valid: RefCell<bool>,
     revisions: Vec<u64>,
     current_revision: u64,
 }
@@ -37,22 +39,22 @@ impl MessagesArea {
             scroll_offset: 0,
             auto_scroll: true,
             markdown: MarkdownRenderer::new(),
-            cached_lines: RefCell::new(Vec::new()),
-            cache_valid: RefCell::new(false),
+            prefix_lines: RefCell::new(Vec::new()),
+            prefix_valid: RefCell::new(false),
             revisions: Vec::new(),
             current_revision: 0,
         }
     }
 
-    fn invalidate_cache(&mut self) {
+    fn invalidate_prefix(&mut self) {
         self.current_revision += 1;
-        *self.cache_valid.borrow_mut() = false;
+        *self.prefix_valid.borrow_mut() = false;
     }
 
     pub fn push_user(&mut self, text: &str) {
         self.messages.push(ChatMessage::User(text.to_string()));
         self.revisions.push(self.current_revision);
-        self.invalidate_cache();
+        self.invalidate_prefix();
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -61,7 +63,7 @@ impl MessagesArea {
     pub fn push_assistant(&mut self, text: &str) {
         self.messages.push(ChatMessage::Assistant(text.to_string()));
         self.revisions.push(self.current_revision);
-        self.invalidate_cache();
+        self.invalidate_prefix();
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -70,7 +72,7 @@ impl MessagesArea {
     pub fn push_tool(&mut self, block: ToolBlock) {
         self.messages.push(ChatMessage::ToolCall(block));
         self.revisions.push(self.current_revision);
-        self.invalidate_cache();
+        self.invalidate_prefix();
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -80,7 +82,7 @@ impl MessagesArea {
         if let Some(last) = self.messages.last_mut() {
             if let ChatMessage::ToolCall(ref mut block) = last {
                 block.arguments = args.to_string();
-                self.invalidate_cache();
+                self.invalidate_prefix();
             }
         }
     }
@@ -90,7 +92,7 @@ impl MessagesArea {
             if let ChatMessage::ToolCall(ref mut block) = last {
                 block.output = output.to_string();
                 block.state = crate::tui::tool_block::ToolState::Success(duration);
-                self.invalidate_cache();
+                self.invalidate_prefix();
             }
         }
     }
@@ -99,7 +101,7 @@ impl MessagesArea {
         if let Some(last) = self.messages.last_mut() {
             if let ChatMessage::ToolCall(ref mut block) = last {
                 block.state = crate::tui::tool_block::ToolState::Error(error.to_string());
-                self.invalidate_cache();
+                self.invalidate_prefix();
             }
         }
     }
@@ -107,7 +109,7 @@ impl MessagesArea {
     pub fn push_system(&mut self, text: &str) {
         self.messages.push(ChatMessage::System(text.to_string()));
         self.revisions.push(self.current_revision);
-        self.invalidate_cache();
+        self.invalidate_prefix();
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -116,7 +118,7 @@ impl MessagesArea {
     pub fn push_error(&mut self, text: &str) {
         self.messages.push(ChatMessage::Error(text.to_string()));
         self.revisions.push(self.current_revision);
-        self.invalidate_cache();
+        self.invalidate_prefix();
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -138,13 +140,16 @@ impl MessagesArea {
                 _ => {
                     self.messages.push(ChatMessage::Assistant(text.to_string()));
                     self.revisions.push(self.current_revision);
+                    // New message added → prefix invalid
+                    *self.prefix_valid.borrow_mut() = false;
                 }
             }
         } else {
             self.messages.push(ChatMessage::Assistant(text.to_string()));
             self.revisions.push(self.current_revision);
+            *self.prefix_valid.borrow_mut() = false;
         }
-        self.invalidate_cache();
+        // DON'T invalidate prefix — only last message changed
         if self.auto_scroll {
             self.scroll_offset = 0;
         }
@@ -154,8 +159,8 @@ impl MessagesArea {
         self.messages.clear();
         self.revisions.clear();
         self.current_revision = 0;
-        *self.cached_lines.borrow_mut() = Vec::new();
-        *self.cache_valid.borrow_mut() = false;
+        *self.prefix_lines.borrow_mut() = Vec::new();
+        *self.prefix_valid.borrow_mut() = false;
         self.scroll_offset = 0;
         self.auto_scroll = true;
     }
@@ -164,21 +169,39 @@ impl MessagesArea {
         let bg = Block::default().style(Style::default().bg(theme::SURFACE));
         frame.render_widget(bg, area);
 
-        if !*self.cache_valid.borrow() {
-            *self.cached_lines.borrow_mut() = self.collect_lines(area.width);
-            *self.cache_valid.borrow_mut() = true;
-        }
+        let content_width = area.width.saturating_sub(2) as usize;
+        let n = self.messages.len();
 
-        let cached = self.cached_lines.borrow();
-        let visible_height = area.height as usize;
-        let total_lines = cached.len();
-
-        if total_lines == 0 {
+        if n == 0 {
             let empty = Paragraph::new(Text::from(vec![Line::from(Span::styled(
                 "  Ready — type a message to begin.",
                 Style::default().fg(theme::TEXT_DIM),
             ))]));
             frame.render_widget(empty, area);
+            return;
+        }
+
+        // Rebuild prefix cache if invalid
+        if !*self.prefix_valid.borrow() && n > 1 {
+            let mut prefix = Vec::new();
+            // Only render messages[0..n-1] into prefix
+            let render_limit = n.saturating_sub(1).min(200);
+            let start = n.saturating_sub(1).saturating_sub(render_limit);
+            for msg in &self.messages[start..n-1] {
+                self.render_one_message(&mut prefix, msg, content_width);
+            }
+            *self.prefix_lines.borrow_mut() = prefix;
+            *self.prefix_valid.borrow_mut() = true;
+        }
+
+        // Always render the last message fresh (it's the one being streamed)
+        let mut all_lines = self.prefix_lines.borrow().clone();
+        self.render_one_message(&mut all_lines, &self.messages[n - 1], content_width);
+
+        let visible_height = area.height as usize;
+        let total_lines = all_lines.len();
+
+        if total_lines == 0 {
             return;
         }
 
@@ -190,88 +213,55 @@ impl MessagesArea {
         };
         let start = max_scroll.saturating_sub(scroll);
         let end = (start + visible_height).min(total_lines);
-        let visible: Vec<Line<'static>> = cached[start..end].to_vec();
+        let visible: Vec<Line<'static>> = all_lines[start..end].to_vec();
 
         let para = Paragraph::new(Text::from(visible));
         frame.render_widget(para, area);
     }
 
-    fn collect_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        let content_width = width.saturating_sub(2) as usize;
-        let total_msgs = self.messages.len();
-
-        // Only render last MAX_RENDER_MESSAGES to avoid freezing on huge sessions
-        const MAX_RENDER_MESSAGES: usize = 200;
-        let start_msg = total_msgs.saturating_sub(MAX_RENDER_MESSAGES);
-
-        for msg in &self.messages[start_msg..] {
-            match msg {
-                ChatMessage::User(text) => {
-                    let wrapped = wrap_text(text, content_width.saturating_sub(2));
-                    for (i, line_text) in wrapped.iter().enumerate() {
-                        let prefix = if i == 0 { "┃ " } else { "  " };
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                prefix.to_string(),
-                                Style::default().fg(theme::PRIMARY).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(line_text.clone(), Style::default().fg(theme::TEXT)),
-                        ]));
-                    }
+    fn render_one_message(&self, lines: &mut Vec<Line<'static>>, msg: &ChatMessage, content_width: usize) {
+        match msg {
+            ChatMessage::User(text) => {
+                let wrapped = wrap_text(text, content_width.saturating_sub(2));
+                for (i, line_text) in wrapped.iter().enumerate() {
+                    let prefix = if i == 0 { "┃ " } else { "  " };
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix.to_string(), Style::default().fg(theme::PRIMARY).add_modifier(Modifier::BOLD)),
+                        Span::styled(line_text.clone(), Style::default().fg(theme::TEXT)),
+                    ]));
                 }
-                ChatMessage::Assistant(text) => {
-                    let rendered = self.markdown.render(text);
-                    for line in rendered.lines {
-                        let mut new_spans = vec![Span::raw("  ")];
-                        new_spans.extend(line.spans);
-                        lines.push(Line::from(new_spans));
-                    }
+            }
+            ChatMessage::Assistant(text) => {
+                let rendered = self.markdown.render(text);
+                for line in rendered.lines {
+                    let mut new_spans = vec![Span::raw("  ")];
+                    new_spans.extend(line.spans);
+                    lines.push(Line::from(new_spans));
                 }
-                ChatMessage::ToolCall(block) => {
-                    self.collect_tool_lines(&mut lines, block, content_width);
+            }
+            ChatMessage::ToolCall(block) => {
+                self.collect_tool_lines(lines, block, content_width);
+            }
+            ChatMessage::System(text) => {
+                let wrapped = wrap_text(text, content_width.saturating_sub(2));
+                for line_text in wrapped {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ".to_string(), Style::default().fg(theme::TEXT_DIM)),
+                        Span::styled(line_text, Style::default().fg(theme::TEXT_DIM).add_modifier(Modifier::ITALIC)),
+                    ]));
                 }
-                ChatMessage::System(text) => {
-                    let wrapped = wrap_text(text, content_width.saturating_sub(2));
-                    for line_text in wrapped {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                "  ".to_string(),
-                                Style::default().fg(theme::TEXT_DIM),
-                            ),
-                            Span::styled(
-                                line_text,
-                                Style::default()
-                                    .fg(theme::TEXT_DIM)
-                                    .add_modifier(Modifier::ITALIC),
-                            ),
-                        ]));
-                    }
-                }
-                ChatMessage::Error(text) => {
-                    let wrapped = wrap_text(text, content_width.saturating_sub(4));
-                    for (i, line_text) in wrapped.iter().enumerate() {
-                        let prefix = if i == 0 { "✗ " } else { "  " };
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                prefix.to_string(),
-                                Style::default().fg(theme::ERROR),
-                            ),
-                            Span::styled(line_text.clone(), Style::default().fg(theme::ERROR)),
-                        ]));
-                    }
+            }
+            ChatMessage::Error(text) => {
+                let wrapped = wrap_text(text, content_width.saturating_sub(4));
+                for (i, line_text) in wrapped.iter().enumerate() {
+                    let prefix = if i == 0 { "✗ " } else { "  " };
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix.to_string(), Style::default().fg(theme::ERROR)),
+                        Span::styled(line_text.clone(), Style::default().fg(theme::ERROR)),
+                    ]));
                 }
             }
         }
-
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "  Ready — type a message to begin.",
-                Style::default().fg(theme::TEXT_DIM),
-            )));
-        }
-
-        lines
     }
 
     fn collect_tool_lines(

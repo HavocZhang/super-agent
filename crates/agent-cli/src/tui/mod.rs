@@ -216,7 +216,10 @@ impl TuiApp {
                 break;
             }
 
-            self.app.tick();
+            // tick() returns true if spinner advanced → need redraw
+            if self.app.tick() {
+                self.needs_redraw = true;
+            }
         }
 
         disable_raw_mode()?;
