@@ -8,8 +8,14 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
-const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024; // ~8K tokens
+// ── Agent 引擎 ──────────────────────────────────────────────
+// 核心运行时，管理消息循环、工具调用、权限检查、上下文窗口等
 
+/// 工具输出最大字节数（约 8K tokens）
+const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
+
+/// 截断工具输出到指定字节数，确保保持在上下文窗口内
+/// 会正确处理 UTF-8 字符边界
 pub fn truncate_tool_output(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
@@ -23,18 +29,36 @@ pub fn truncate_tool_output(s: &str, max_bytes: usize) -> String {
     result
 }
 
+/// Agent 引擎 —— 核心运行时
+///
+/// 管理完整的 Agent 循环:
+/// 1. 接收用户消息
+/// 2. 注入相关记忆
+/// 3. 调用 LLM 获取响应
+/// 4. 执行工具调用（支持并行）
+/// 5. 检测死循环（doom loop）
+/// 6. 上下文压缩
 pub struct AgentEngine {
+    /// LLM 提供者（如 OpenAI、DeepSeek）
     llm: Arc<Box<dyn LlmProvider>>,
+    /// 工具注册表
     tools: Arc<ToolRegistry>,
+    /// Agent 配置
     config: AgentConfig,
+    /// 对话消息列表（线程安全）
     messages: Arc<RwLock<Vec<Message>>>,
+    /// 当前工作目录
     working_dir: Arc<RwLock<String>>,
+    /// 可选的记忆存储
     memory: Option<Arc<MemoryStore>>,
+    /// 权限管理器
     permissions: Arc<PermissionManager>,
+    /// 上下文管理器（token 估算、压缩、溢出检测）
     context: Arc<ContextManager>,
 }
 
 impl AgentEngine {
+    /// 内部构造函数，统一处理 Arc 包装
     fn new_impl(llm: Arc<Box<dyn LlmProvider>>, tools: ToolRegistry, config: AgentConfig) -> Self {
         let messages = Arc::new(RwLock::new(vec![Message::system(&config.system_prompt)]));
         let perm_mode = PermissionMode::from_str(&config.permission_mode);
@@ -56,54 +80,70 @@ impl AgentEngine {
         }
     }
 
+    /// 创建新的 Agent 引擎
     pub fn new(llm: Box<dyn LlmProvider>, tools: ToolRegistry, config: AgentConfig) -> Self {
         Self::new_impl(Arc::new(llm), tools, config)
     }
 
+    /// 从已 Arc 包装的 LLM 提供者创建
     pub fn from_parts(llm: Arc<Box<dyn LlmProvider>>, tools: ToolRegistry, config: AgentConfig) -> Self {
         Self::new_impl(llm, tools, config)
     }
 
+    /// 克隆 LLM 提供者的 Arc 引用（用于子 agent）
     pub fn llm_clone(&self) -> Arc<Box<dyn LlmProvider>> {
         Arc::clone(&self.llm)
     }
 
+    /// 获取工具注册表的 Arc 引用
     pub fn tools_arc(&self) -> Arc<ToolRegistry> {
         Arc::clone(&self.tools)
     }
 
+    /// 启用记忆存储（从文件路径）
     pub fn with_memory(mut self, path: &str) -> Result<Self> {
         self.memory = Some(Arc::new(MemoryStore::new(path)?));
         Ok(self)
     }
 
+    /// 启用记忆存储（使用已有实例）
     pub fn with_memory_store(mut self, store: MemoryStore) -> Self {
         self.memory = Some(Arc::new(store));
         self
     }
 
+    /// 设置工作目录
     pub async fn set_working_dir(&self, dir: &str) {
         let mut wd = self.working_dir.write().await;
         *wd = dir.to_string();
     }
 
+    /// 获取当前工作目录
     pub async fn working_dir(&self) -> String {
         self.working_dir.read().await.clone()
     }
 
+    /// 清空对话历史（保留系统提示词）
     pub async fn clear(&self) {
         let mut msgs = self.messages.write().await;
         *msgs = vec![Message::system(&self.config.system_prompt)];
     }
 
+    /// 获取所有消息
     pub async fn messages(&self) -> Vec<Message> {
         self.messages.read().await.clone()
     }
 
+    /// 获取配置引用
     pub fn config(&self) -> &AgentConfig {
         &self.config
     }
 
+    /// 运行 Agent（非流式模式）
+    ///
+    /// 处理用户消息，在 max_iterations 范围内循环：
+    /// - 如果 LLM 返回文本 -> 返回结果
+    /// - 如果 LLM 调用工具 -> 执行工具 -> 继续循环
     pub async fn run(&self, user_message: &str) -> Result<String> {
         {
             let mut msgs = self.messages.write().await;
@@ -160,6 +200,23 @@ impl AgentEngine {
         Err(anyhow::anyhow!("Max iterations ({}) reached", self.config.max_iterations))
     }
 
+// ── 流式 Agent 循环 ────────────────────────────────────────
+//
+// `run_stream` 是 agent-core 的核心功能：
+// 1. 接收用户消息，注入记忆
+// 2. 在后台任务中运行迭代式 agent 循环
+// 3. 通过 mpsc channel 将事件流式发送给 UI
+// 4. 支持：上下文压缩、权限检查、死循环检测、并行工具执行
+
+    /// 运行 Agent（流式模式），返回事件流
+    ///
+    /// 事件类型包括：
+    /// - `StreamEvent::Token` - LLM 生成的文本 token
+    /// - `StreamEvent::ToolCallStart/ToolCallEnd` - 工具调用
+    /// - `StreamEvent::ToolSnapshot` - 文件编辑前的快照
+    /// - `StreamEvent::ToolResult` - 工具执行结果
+    /// - `StreamEvent::Done` - Agent 完成
+    /// - `StreamEvent::Error` - 错误信息
     pub async fn run_stream(&self, user_message: &str) -> StreamResponse {
         // Add user message
         {

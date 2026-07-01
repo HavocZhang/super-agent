@@ -2,24 +2,42 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::path::Path;
 
+// ── Hook 执行器 ─────────────────────────────────────────────
+// 在 Agent 生命周期的特定事件点触发自定义脚本
+
+/// Hook 事件类型 —— 定义何时触发
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 pub enum HookEvent {
+    /// 工具使用前
     PreToolUse,
+    /// 工具使用后
     PostToolUse,
+    /// 用户提交提示词时
     UserPromptSubmit,
+    /// Agent 停止时
     Stop,
+    /// 会话开始时
     SessionStart,
+    /// 会话结束时
     SessionEnd,
+    /// 子 agent 停止时
     SubagentStop,
+    /// 通知事件
     Notification,
+    /// 压缩上下文前
     PreCompact,
 }
 
+/// Hook 配置
 #[derive(Debug, Clone)]
 pub struct HookConfig {
+    /// 触发事件
     pub event: HookEvent,
+    /// 要执行的 shell 命令
     pub command: String,
+    /// 超时时间（毫秒）
     pub timeout_ms: u64,
+    /// 是否阻塞 Agent 执行
     pub blocking: bool,
 }
 

@@ -1,33 +1,59 @@
 use agent_llm::{Message, Role};
 
+// ── 上下文管理器 ────────────────────────────────────────────
+// 管理 LLM 的上下文窗口：token 估算、溢出检测、消息压缩
+
+/// 默认最大 token 数（用于上下文窗口限制）
 pub const DEFAULT_MAX_TOKENS: usize = 180_000;
+/// 溢出警告阈值（达到最大 token 的 90%）
 pub const WARNING_THRESHOLD: f64 = 0.9;
+/// 压缩缓冲区大小（保留空间给新消息）
 pub const COMPACTION_BUFFER: usize = 20_000;
+/// 压缩时保留的最小 token 数
 pub const PRUNE_MINIMUM: usize = 20_000;
+/// 压缩时保护保留的 token 数
 pub const PRUNE_PROTECT: usize = 40_000;
+/// 受保护的工具名称列表（这些工具的结果不会被压缩掉）
 pub const PROTECTED_TOOLS: &[&str] = &[];
 
+/// 上下文溢出级别
 #[derive(Debug, Clone, PartialEq)]
 pub enum OverflowLevel {
+    /// 正常
     None,
+    /// 警告级别（超过 90%）
     Warning,
+    /// 严重级别（超过 100%）
     Critical,
 }
 
+/// 上下文状态枚举
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContextStatus {
+    /// 正常
     Normal,
+    /// 警告
     Warning,
+    /// 严重
     Critical,
 }
 
+/// 上下文管理器 —— 估算 token 数、检测溢出、执行消息压缩
+///
+/// # Token 估算算法
+/// - 中文: 每个字符约 1.5 tokens
+/// - 其他字符: 每 4 个字符约 1 token
 pub struct ContextManager {
+    /// 最大 token 数
     max_tokens: usize,
+    /// 触发压缩的阈值比例（默认 0.8 = 80%）
     compaction_threshold: f64,
+    /// 压缩时保留的最新消息条数
     keep_recent: usize,
 }
 
 impl ContextManager {
+    /// 创建新的上下文管理器
     pub fn new(max_tokens: usize) -> Self {
         Self {
             max_tokens,
@@ -36,20 +62,24 @@ impl ContextManager {
         }
     }
 
+    /// 设置压缩阈值
     pub fn with_threshold(mut self, threshold: f64) -> Self {
         self.compaction_threshold = threshold;
         self
     }
 
+    /// 设置保留的最新消息数
     pub fn with_keep_recent(mut self, keep_recent: usize) -> Self {
         self.keep_recent = keep_recent;
         self
     }
 
+    /// 估算消息列表的总 token 数
     pub fn estimate_tokens(&self, messages: &[Message]) -> usize {
         messages.iter().map(|m| estimate_message_tokens(m)).sum()
     }
 
+    /// 估算文本片段的 token 数
     pub fn estimate_text_tokens(text: &str) -> usize {
         let mut chinese_chars = 0usize;
         let mut other_chars = 0usize;

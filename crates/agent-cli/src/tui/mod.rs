@@ -23,6 +23,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScree
 use futures_util::StreamExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
@@ -47,6 +48,24 @@ impl FrameRateLimiter {
     }
 }
 
+/// Events from the background agent task to the main UI loop.
+enum AgentEvent {
+    /// Streaming text token
+    Token(String),
+    /// A tool call started (name)
+    ToolCallStart(String),
+    /// Tool call arguments resolved (name, arguments_json)
+    ToolCallEnd(String, String),
+    /// Tool execution completed (name, output, duration_ms)
+    ToolResult(String, String, u64),
+    /// File snapshot before edit (path, content)
+    ToolSnapshot(String, String),
+    /// Agent turn finished normally
+    Done,
+    /// Agent error
+    Error(String),
+}
+
 pub struct TuiApp {
     terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     app: App,
@@ -56,6 +75,9 @@ pub struct TuiApp {
     _mcp_manager: McpManager,
     limiter: FrameRateLimiter,
     needs_redraw: bool,
+    /// Channel for receiving events from the background agent task.
+    agent_rx: Option<mpsc::Receiver<AgentEvent>>,
+    /// Track which tool is currently executing for timing.
     tool_start_time: Option<Instant>,
 }
 
@@ -82,6 +104,7 @@ impl TuiApp {
             _mcp_manager: mcp_manager,
             limiter: FrameRateLimiter::new(),
             needs_redraw: true,
+            agent_rx: None,
             tool_start_time: None,
         })
     }
@@ -104,11 +127,60 @@ impl TuiApp {
         self.app.footer.set_model(&self.app.model);
 
         loop {
+            // Drain agent events (non-blocking)
+            if let Some(ref mut rx) = self.agent_rx {
+                let mut agent_done = false;
+                while let Ok(evt) = rx.try_recv() {
+                    match evt {
+                        AgentEvent::Token(token) => {
+                            if self.app.messages.last_is_assistant() {
+                                self.app.messages.append_to_last(&token);
+                            } else {
+                                self.app.messages.push_assistant(&token);
+                            }
+                            self.needs_redraw = true;
+                        }
+                        AgentEvent::ToolCallStart(name) => {
+                            use crate::tui::tool_block::ToolBlock;
+                            self.app.messages.push_tool(ToolBlock::new(&name, ""));
+                            self.needs_redraw = true;
+                        }
+                        AgentEvent::ToolCallEnd(_name, args) => {
+                            self.app.messages.update_last_tool_args(&args);
+                            self.tool_start_time = Some(Instant::now());
+                            self.needs_redraw = true;
+                        }
+                        AgentEvent::ToolResult(_name, output, dur_ms) => {
+                            let dur = Duration::from_millis(dur_ms);
+                            self.app.messages.finish_last_tool(&output, dur);
+                            self.needs_redraw = true;
+                        }
+                        AgentEvent::ToolSnapshot(path, content) => {
+                            // Store for diff later — handled in finish
+                            self.app.pending_snapshots.push((path, content));
+                        }
+                        AgentEvent::Done => {
+                            agent_done = true;
+                        }
+                        AgentEvent::Error(e) => {
+                            self.app.messages.push_error(&e);
+                            agent_done = true;
+                        }
+                    }
+                }
+                if agent_done {
+                    self.finish_turn().await;
+                    self.agent_rx = None;
+                }
+            }
+
+            // Draw
             if self.needs_redraw && self.limiter.should_draw() {
                 self.terminal.draw(|frame| self.app.render(frame))?;
                 self.needs_redraw = false;
             }
 
+            // Poll events
             if event::poll(Duration::from_millis(8))? {
                 match event::read()? {
                     Event::Key(key) => {
@@ -151,7 +223,8 @@ impl TuiApp {
         execute!(
             std::io::stdout(),
             LeaveAlternateScreen,
-            DisableBracketedPaste
+            DisableBracketedPaste,
+            crossterm::event::DisableMouseCapture
         )?;
         Ok(())
     }
@@ -173,6 +246,28 @@ impl TuiApp {
             return Ok(false);
         }
 
+        // If agent is running, only allow Ctrl+C and Esc
+        if self.agent_rx.is_some() {
+            match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // TODO: abort the running task
+                    self.app.spinner.stop();
+                    self.app.status = "Interrupted".to_string();
+                    self.app.header.set_streaming(false);
+                    self.agent_rx = None;
+                    self.needs_redraw = true;
+                }
+                KeyCode::Esc => {
+                    self.app.spinner.stop();
+                    self.app.status = "Ready".to_string();
+                    self.app.header.set_streaming(false);
+                    self.needs_redraw = true;
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         // Normal mode
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -188,7 +283,7 @@ impl TuiApp {
                     let input = self.app.input.clone();
                     self.app.input.clear();
                     self.app.input_cursor = 0;
-                    self.handle_user_input(&input).await?;
+                    self.submit_input(&input).await;
                 }
             }
             KeyCode::Char(ch) => {
@@ -244,177 +339,112 @@ impl TuiApp {
         Ok(false)
     }
 
-    async fn handle_user_input(&mut self, input: &str) -> anyhow::Result<()> {
+    /// Submit user input — spawns a background task for agent execution.
+    async fn submit_input(&mut self, input: &str) {
         if input.starts_with('/') {
-            self.handle_command(input).await?;
-            return Ok(());
+            self.handle_command(input).await;
+            return;
         }
 
         let expanded = crate::resolve_at_references(input);
-
-        self.app.messages.push_user(input);
+        self.app.messages.push_user(&expanded);
         self.app.status = "Thinking...".to_string();
         self.app.spinner.start();
         self.app.header.set_streaming(true);
+        self.needs_redraw = true;
 
-        let stream = self.engine.run_stream(&expanded).await;
-        let mut agent_response = String::new();
-        let mut tool_snapshots: Vec<(String, String)> = Vec::new();
-        let mut last_draw = std::time::Instant::now();
-        let draw_interval = std::time::Duration::from_millis(16); // ~60 FPS during streaming
+        // Spawn background agent task
+        let (tx, rx) = mpsc::channel::<AgentEvent>(256);
+        self.agent_rx = Some(rx);
 
-        // Draw immediately to show spinner
-        let _ = self.terminal.draw(|frame| self.app.render(frame));
+        let engine = self.engine.clone();
+        let user_input = input.to_string();
 
-        tokio::pin!(stream);
-        loop {
-            // Poll for mouse/key events between stream events (non-blocking)
-            while crossterm::event::poll(std::time::Duration::ZERO)? {
-                match crossterm::event::read()? {
-                    crossterm::event::Event::Mouse(mouse) => {
-                        use crossterm::event::MouseEventKind;
-                        match mouse.kind {
-                            MouseEventKind::ScrollUp => {
-                                self.app.messages.scroll_up(3);
-                                let _ = self.terminal.draw(|frame| self.app.render(frame));
-                            }
-                            MouseEventKind::ScrollDown => {
-                                self.app.messages.scroll_down(3);
-                                let _ = self.terminal.draw(|frame| self.app.render(frame));
-                            }
-                            _ => {}
-                        }
+        tokio::spawn(async move {
+            let stream = engine.run_stream(&expanded).await;
+            tokio::pin!(stream);
+
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(StreamEvent::Token(token)) => {
+                        if tx.send(AgentEvent::Token(token)).await.is_err() { return; }
                     }
-                    crossterm::event::Event::Key(key) => {
-                        // Ctrl+C during streaming = abort
-                        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                            break;
-                        }
-                        // Esc during streaming = stop spinner but let stream finish
-                        if key.code == KeyCode::Esc {
-                            self.app.spinner.stop();
-                        }
+                    Ok(StreamEvent::ToolCallStart { name, .. }) => {
+                        if tx.send(AgentEvent::ToolCallStart(name)).await.is_err() { return; }
                     }
-                    _ => {}
+                    Ok(StreamEvent::ToolCallEnd { name, arguments, .. }) => {
+                        let args_str = if arguments.is_string() {
+                            arguments.as_str().unwrap_or("").to_string()
+                        } else {
+                            serde_json::to_string_pretty(&arguments).unwrap_or_default()
+                        };
+                        if tx.send(AgentEvent::ToolCallEnd(name, args_str)).await.is_err() { return; }
+                    }
+                    Ok(StreamEvent::ToolResult { name, output, .. }) => {
+                        if tx.send(AgentEvent::ToolResult(name, output, 0)).await.is_err() { return; }
+                    }
+                    Ok(StreamEvent::ToolSnapshot { path, content }) => {
+                        let _ = tx.send(AgentEvent::ToolSnapshot(path, content)).await;
+                    }
+                    Ok(StreamEvent::Done) => {
+                        let _ = tx.send(AgentEvent::Done).await;
+                        return;
+                    }
+                    Ok(StreamEvent::Error(e)) => {
+                        let _ = tx.send(AgentEvent::Error(e)).await;
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AgentEvent::Error(e.to_string())).await;
+                        return;
+                    }
+                    _ => {} // ToolCallDelta and other events ignored
                 }
             }
+            // Stream ended without Done
+            let _ = tx.send(AgentEvent::Done).await;
+        });
 
-            // Try to get next stream event (with timeout so we can poll input)
-            let next_event = tokio::time::timeout(
-                std::time::Duration::from_millis(16),
-                stream.next()
-            ).await;
+        // Store user input for session save later
+        self.app.pending_user_input = Some(user_input);
+    }
 
-            let event = match next_event {
-                Ok(Some(event)) => event,
-                Ok(None) => break,       // Stream ended
-                Err(_) => continue,      // Timeout — loop back to poll mouse events
-            };
-
-            match event {
-                Ok(StreamEvent::Token(token)) => {
-                    agent_response.push_str(&token);
-                    if self.app.messages.last_is_assistant() {
-                        self.app.messages.append_to_last(&token);
-                    } else {
-                        self.app.messages.push_assistant(&token);
-                    }
-                    // Draw immediately for streaming tokens (throttled to ~60 FPS)
-                    let now = std::time::Instant::now();
-                    if now.duration_since(last_draw) >= draw_interval {
-                        let _ = self.terminal.draw(|frame| self.app.render(frame));
-                        last_draw = now;
-                    }
-                }
-                Ok(StreamEvent::ToolCallStart { ref name, .. }) => {
-                    use crate::tui::tool_block::ToolBlock;
-                    self.app.messages.push_tool(ToolBlock::new(name, ""));
-                    let _ = self.terminal.draw(|frame| self.app.render(frame));
-                    last_draw = std::time::Instant::now();
-                }
-                Ok(StreamEvent::ToolCallEnd { ref name, ref arguments, .. }) => {
-                    let args_str = if arguments.is_string() {
-                        arguments.as_str().unwrap_or("").to_string()
-                    } else if arguments.is_object() || arguments.is_array() {
-                        serde_json::to_string_pretty(arguments).unwrap_or_default()
-                    } else {
-                        arguments.to_string()
-                    };
-                    self.app.messages.update_last_tool_args(&args_str);
-                    self.tool_start_time = Some(std::time::Instant::now());
-                    let _ = self.terminal.draw(|frame| self.app.render(frame));
-                    last_draw = std::time::Instant::now();
-                }
-                Ok(StreamEvent::ToolResult { ref name, ref output, .. }) => {
-                    let duration = self.tool_start_time.take()
-                        .map(|t| t.elapsed())
-                        .unwrap_or_default();
-                    self.app.messages.finish_last_tool(output, duration);
-                    let _ = self.terminal.draw(|frame| self.app.render(frame));
-                    last_draw = std::time::Instant::now();
-                }
-                Ok(StreamEvent::ToolSnapshot { path, content }) => {
-                    tool_snapshots.push((path, content));
-                }
-                Ok(StreamEvent::Done) => break,
-                Ok(StreamEvent::Error(e)) => {
-                    self.app.messages.push_error(&e);
-                    break;
-                }
-                Err(e) => {
-                    self.app.messages.push_error(&e.to_string());
-                    break;
-                }
-                _ => {}
-            }
-        }
-
+    /// Called when the agent turn finishes — save session, show diffs.
+    async fn finish_turn(&mut self) {
         self.app.spinner.stop();
         self.app.status = "Ready".to_string();
         self.app.header.set_streaming(false);
 
-        for (path, old_content) in &tool_snapshots {
+        // Show file diffs
+        let snapshots = std::mem::take(&mut self.app.pending_snapshots);
+        for (path, old_content) in &snapshots {
             if let Ok(new_content) = std::fs::read_to_string(path) {
                 if old_content != &new_content {
                     let diff = agent_core::FileDiff::diff(old_content, &new_content, path);
-                    self.app
-                        .messages
-                        .push_system(&format!("Changes in {}:\n{}", path, diff));
+                    self.app.messages.push_system(&format!("Changes in {}:\n{}", path, diff));
                 }
             }
         }
 
+        // Save to session
         if let Some(ref store) = self.session_store {
             if !self.current_session_id.is_empty() {
-                let _ = store.append_message(
-                    &self.current_session_id,
-                    &SessionMessage {
+                if let Some(ref input) = self.app.pending_user_input {
+                    let _ = store.append_message(&self.current_session_id, &SessionMessage {
                         role: "user".to_string(),
-                        content: input.to_string(),
+                        content: input.clone(),
                         tool_calls: None,
                         tool_call_id: None,
                         timestamp: Utc::now().to_rfc3339(),
-                    },
-                );
-                if !agent_response.is_empty() {
-                    let _ = store.append_message(
-                        &self.current_session_id,
-                        &SessionMessage {
-                            role: "assistant".to_string(),
-                            content: agent_response,
-                            tool_calls: None,
-                            tool_call_id: None,
-                            timestamp: Utc::now().to_rfc3339(),
-                        },
-                    );
+                    });
                 }
             }
         }
-
-        Ok(())
+        self.app.pending_user_input = None;
+        self.needs_redraw = true;
     }
 
-    async fn handle_command(&mut self, input: &str) -> anyhow::Result<()> {
+    async fn handle_command(&mut self, input: &str) {
         let cmd = input.split_whitespace().next().unwrap_or(input);
         match cmd {
             "/quit" | "/exit" | "/q" => {
@@ -429,9 +459,7 @@ impl TuiApp {
                 self.app.messages.clear();
             }
             "/model" => {
-                self.app
-                    .messages
-                    .push_system(&format!("Model: {}", self.app.model));
+                self.app.messages.push_system(&format!("Model: {}", self.app.model));
             }
             _ => {
                 self.app.messages.push_system(&format!(
@@ -440,7 +468,7 @@ impl TuiApp {
                 ));
             }
         }
-        Ok(())
+        self.needs_redraw = true;
     }
 }
 

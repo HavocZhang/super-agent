@@ -22,15 +22,23 @@ pub use registry::ToolRegistry;
 use async_trait::async_trait;
 use serde_json::Value;
 
+// ── 工具系统 ────────────────────────────────────────────────
+// 定义 Tool trait 和默认工具集合
+
+/// 工具 trait —— 所有工具必须实现此接口
 #[async_trait]
 pub trait Tool: Send + Sync {
+    /// 工具名称（如 "file_read", "shell"）
     fn name(&self) -> &str;
+    /// 工具描述（用于 LLM 了解工具用途）
     fn description(&self) -> &str;
+    /// 工具输入参数的 JSON Schema
     fn input_schema(&self) -> Value;
-
+    /// 执行工具，返回输出文本
     async fn execute(&self, args: &Value, working_dir: &str) -> anyhow::Result<String>;
 }
 
+/// 创建默认工具集（所有工具）
 pub fn default_tools() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(shell::ShellTool));

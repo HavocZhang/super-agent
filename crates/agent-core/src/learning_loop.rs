@@ -4,6 +4,15 @@ use anyhow::Result;
 use std::sync::Arc;
 use tracing::debug;
 
+// ── 学习循环 ────────────────────────────────────────────────
+// 定期分析对话内容，提取有价值的记忆并保存
+
+/// 学习循环 —— 周期性分析对话并提取记忆
+///
+/// 功能：
+/// 1. 每 N 轮对话触发一次"轻推"（nudge），询问是否保存重要信息
+/// 2. 从对话中批量提取记忆（偏好、项目知识、错误经验、成功模式）
+/// 3. 生成会话摘要
 pub struct LearningLoop {
     memory: Arc<MemoryStore>,
     llm: Arc<Box<dyn LlmProvider>>,
@@ -12,19 +21,28 @@ pub struct LearningLoop {
     model: String,
 }
 
+/// 记忆条目
 pub struct MemoryEntry {
+    /// 记忆内容
     pub content: String,
+    /// 记忆类型 (preference/project/error/success)
     pub memory_type: String,
+    /// 重要程度 (0.0~1.0)
     pub importance: f64,
 }
 
+/// 会话摘要
 pub struct SessionSummary {
+    /// 会话 ID
     pub session_id: String,
+    /// 摘要内容
     pub summary: String,
+    /// 关键决策
     pub key_decisions: Vec<String>,
 }
 
 impl LearningLoop {
+    /// 创建学习循环
     pub fn new(memory: Arc<MemoryStore>, llm: Arc<Box<dyn LlmProvider>>, model: Option<String>) -> Self {
         Self {
             memory,

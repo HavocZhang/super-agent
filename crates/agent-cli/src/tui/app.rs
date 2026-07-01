@@ -23,6 +23,10 @@ pub struct App {
     pub running: bool,
     pub model: String,
     pub status: String,
+    /// File snapshots pending diff display after agent turn.
+    pub pending_snapshots: Vec<(String, String)>,
+    /// User input saved for session persistence after agent turn.
+    pub pending_user_input: Option<String>,
 }
 
 impl App {
@@ -42,6 +46,8 @@ impl App {
             running: true,
             model: model.to_string(),
             status: "Ready".to_string(),
+            pending_snapshots: Vec::new(),
+            pending_user_input: None,
         }
     }
 

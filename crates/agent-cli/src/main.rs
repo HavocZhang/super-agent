@@ -28,16 +28,23 @@ fn red(s: &str) -> String { format!("\x1b[1;31m{}\x1b[0m", s) }
 fn dim(s: &str) -> String { format!("\x1b[2m{}\x1b[0m", s) }
 fn italic(s: &str) -> String { format!("\x1b[3m{}\x1b[0m", s) }
 
-// ── Config ──────────────────────────────────────────────────
+// ── 配置结构体 ───────────────────────────────────────────────
+// 从 TOML 文件或环境变量中读取应用配置
 
+/// 应用顶层配置
+/// 从 ~/.agent/config.toml 文件中反序列化
 #[derive(serde::Deserialize)]
 struct AppConfig {
+    /// API密钥 (必填)
     api_key: String,
+    /// 自定义API基础URL (可选，默认为 OpenAI)
     base_url: Option<String>,
+    /// Agent运行时配置 (有默认值)
     #[serde(default)]
     agent: AgentConfig,
 }
 
+/// 加载配置：优先读取 ~/.agent/config.toml，否则从环境变量 OPENAI_API_KEY 获取
 fn load_config() -> Result<AppConfig> {
     let config_path = dirs::home_dir()
         .unwrap_or_default()
