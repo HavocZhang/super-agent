@@ -103,39 +103,37 @@ impl App {
         let prefix = "> ";
         let cursor_char = "▏";
 
-        // Build the full display string with cursor
-        let before: String = self.input.chars().take(self.input_cursor).collect();
-        let after: String = self.input.chars().skip(self.input_cursor).collect();
-        let full = format!("{}{}{}{}", prefix, before, cursor_char, after);
+        // input_cursor is a BYTE offset. Convert to char index for chars().take/skip.
+        let char_idx = self.input[..self.input_cursor].chars().count();
+        let before: String = self.input.chars().take(char_idx).collect();
+        let after: String = self.input.chars().skip(char_idx).collect();
 
-        // Truncate to fit visible width using display width (CJK safe)
-        let mut display = String::new();
-        let mut w = 0;
-        for ch in full.chars() {
-            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-            if w + cw > visible_width {
-                break;
-            }
-            display.push(ch);
-            w += cw;
-        }
-
-        let cursor_style = Style::default().fg(theme::PRIMARY);
-        let text_style = Style::default().fg(theme::TEXT);
-
+        // Build spans: prefix + before_cursor + cursor + after_cursor
         let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Span::styled(prefix.to_string(), text_style));
+        let text_style = Style::default().fg(theme::TEXT);
+        let cursor_style = Style::default().fg(theme::PRIMARY);
 
-        // Before cursor
+        spans.push(Span::styled(prefix.to_string(), text_style));
         for ch in before.chars() {
             spans.push(Span::styled(ch.to_string(), text_style));
         }
-        // Cursor
         spans.push(Span::styled(cursor_char.to_string(), cursor_style));
-        // After cursor
         for ch in after.chars() {
             spans.push(Span::styled(ch.to_string(), text_style));
         }
+
+        // Calculate total display width and truncate if needed
+        let mut total_w = 0usize;
+        let mut truncate_at = spans.len();
+        for (i, span) in spans.iter().enumerate() {
+            let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
+            if total_w + w > visible_width {
+                truncate_at = i;
+                break;
+            }
+            total_w += w;
+        }
+        spans.truncate(truncate_at);
 
         let para = Paragraph::new(Line::from(spans));
         frame.render_widget(para, inner);

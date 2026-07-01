@@ -117,7 +117,7 @@ impl MessagesArea {
         let end = (start + visible_height).min(total_lines);
         let visible: Vec<Line<'static>> = all_lines[start..end].to_vec();
 
-        let para = Paragraph::new(Text::from(visible)).wrap(Wrap { trim: false });
+        let para = Paragraph::new(Text::from(visible));
         frame.render_widget(para, area);
     }
 
@@ -128,20 +128,24 @@ impl MessagesArea {
         for msg in &self.messages {
             match msg {
                 ChatMessage::User(text) => {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "┃ ".to_string(),
-                            Style::default().fg(theme::PRIMARY).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(text.clone(), Style::default().fg(theme::TEXT)),
-                    ]));
+                    // Wrap user messages at content_width
+                    let wrapped = wrap_text(text, content_width.saturating_sub(2));
+                    for (i, line_text) in wrapped.iter().enumerate() {
+                        let prefix = if i == 0 { "┃ " } else { "  " };
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                prefix.to_string(),
+                                Style::default().fg(theme::PRIMARY).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(line_text.clone(), Style::default().fg(theme::TEXT)),
+                        ]));
+                    }
                 }
                 ChatMessage::Assistant(text) => {
                     let rendered = self.markdown.render(text);
-                    for mut line in rendered.lines {
-                        // Indent assistant lines
+                    for line in rendered.lines {
                         let mut new_spans = vec![Span::raw("  ")];
-                        new_spans.append(&mut line.spans);
+                        new_spans.extend(line.spans);
                         lines.push(Line::from(new_spans));
                     }
                 }
@@ -150,15 +154,14 @@ impl MessagesArea {
                 }
                 ChatMessage::System(text) => {
                     let wrapped = wrap_text(text, content_width.saturating_sub(2));
-                    for (i, line_text) in wrapped.iter().enumerate() {
-                        let prefix = if i == 0 { "  " } else { "  " };
+                    for line_text in wrapped {
                         lines.push(Line::from(vec![
                             Span::styled(
-                                prefix.to_string(),
+                                "  ".to_string(),
                                 Style::default().fg(theme::TEXT_DIM),
                             ),
                             Span::styled(
-                                line_text.clone(),
+                                line_text,
                                 Style::default()
                                     .fg(theme::TEXT_DIM)
                                     .add_modifier(Modifier::ITALIC),
@@ -196,7 +199,7 @@ impl MessagesArea {
         &self,
         lines: &mut Vec<Line<'static>>,
         block: &ToolBlock,
-        _content_width: usize,
+        content_width: usize,
     ) {
         let display = match block.name.as_str() {
             "file_read" => "Read File",
@@ -225,8 +228,9 @@ impl MessagesArea {
                 _ => theme::SPINNER,
             };
 
-            let args_preview = if block.arguments.len() > 40 {
-                format!("{}…", &block.arguments[..38])
+            // Truncate arguments by char count (CJK safe)
+            let args_preview = if block.arguments.chars().count() > 40 {
+                format!("{}…", block.arguments.chars().take(39).collect::<String>())
             } else {
                 block.arguments.clone()
             };
@@ -242,43 +246,53 @@ impl MessagesArea {
                 Span::styled(status, Style::default().fg(status_color)),
             ]));
         } else {
-            // Expanded tool block
+            // Expanded tool block - use actual content width
+            let border_w = content_width.saturating_sub(4).min(60);
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("  ┌─ {} ", display),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    "─".repeat(30),
+                    "─".repeat(border_w.saturating_sub(display.len() + 4)),
                     Style::default().fg(color),
                 ),
             ]));
 
             // Arguments
-            lines.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(color)),
-                Span::styled(
-                    format!("$ {}", block.arguments),
-                    Style::default().fg(theme::TEXT),
-                ),
-            ]));
+            let arg_width = content_width.saturating_sub(6);
+            for arg_line in wrap_text(&block.arguments, arg_width) {
+                lines.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(color)),
+                    Span::styled(arg_line, Style::default().fg(theme::TEXT)),
+                ]));
+            }
 
             // Output
             if !block.output.is_empty() {
-                for line in block.output.lines() {
+                let output_text: String = block.output.chars().take(500).collect();
+                for out_line in wrap_text(&output_text, arg_width) {
                     lines.push(Line::from(vec![
                         Span::styled("  │ ", Style::default().fg(color)),
-                        Span::styled(line.to_string(), Style::default().fg(theme::TEXT_DIM)),
+                        Span::styled(out_line, Style::default().fg(theme::TEXT_DIM)),
+                    ]));
+                }
+                if block.output.chars().count() > 500 {
+                    lines.push(Line::from(vec![
+                        Span::styled("  │ ", Style::default().fg(color)),
+                        Span::styled("…(truncated)", Style::default().fg(theme::TEXT_DIM)),
                     ]));
                 }
             }
 
             // Error
             if let crate::tui::tool_block::ToolState::Error(ref err) = block.state {
-                lines.push(Line::from(vec![
-                    Span::styled("  │ ", Style::default().fg(color)),
-                    Span::styled(err.clone(), Style::default().fg(theme::ERROR)),
-                ]));
+                for err_line in wrap_text(err, arg_width) {
+                    lines.push(Line::from(vec![
+                        Span::styled("  │ ", Style::default().fg(color)),
+                        Span::styled(err_line, Style::default().fg(theme::ERROR)),
+                    ]));
+                }
             }
 
             // Footer
