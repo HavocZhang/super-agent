@@ -1,3 +1,13 @@
+/// TUI 模块 — 基于 ratatui 的全屏终端界面
+///
+/// 架构：非阻塞事件驱动
+/// - 主循环: drain agent_rx + poll keyboard/mouse + draw + tick
+/// - 后台 task: engine.run_stream() → mpsc channel → AgentEvent
+/// - 帧率限制: 120 FPS (MIN_FRAME_INTERVAL = 8ms)
+/// - 流式渲染: 前缀缓存，append_to_last 不使 prefix 失效
+///
+/// 布局: [Header(1)] [Messages(Min)] [Approval(条件)] [Input(3)] [Footer(1)]
+
 pub mod app;
 pub mod approval;
 pub mod component;

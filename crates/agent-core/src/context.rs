@@ -2,7 +2,20 @@ use agent_llm::{Message, Role};
 use std::collections::HashSet;
 
 // ── 上下文管理器 ────────────────────────────────────────────
-// 管理 LLM 的上下文窗口：token 估算、溢出检测、消息压缩
+// 管理 LLM 的上下文窗口：token 估算、溢出检测、消息压缩。
+//
+// 核心职责：
+// 1. Token 估算: 中文 1.5 token/字，英文 0.25 token/字符
+// 2. 溢出检测: Warning(90%) / Critical(100%)
+// 3. 智能压缩: 保护 system 消息 + 最近 N 条 + 摘要旧消息
+// 4. 消息清理: sanitize_messages 移除孤立 tool result (防 API 400)
+//
+// 压缩策略：
+// - compact(): 简单压缩，保留 system + 最近 keep_recent 条 + 摘要
+// - smart_compact(): 保留 system + 受保护工具结果 + 最近 PRUNE_PROTECT 范围
+// - smart_compact_enhanced(): 在 smart_compact 基础上保护受保护工具的结果
+//
+// 所有 compact 方法返回前调用 sanitize_messages() 确保消息序列合法。
 
 /// 默认最大 token 数（用于上下文窗口限制）
 pub const DEFAULT_MAX_TOKENS: usize = 180_000;

@@ -9,17 +9,35 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
 // ── Agent 引擎 ──────────────────────────────────────────────
-// 核心运行时，管理消息循环、工具调用、权限检查、上下文窗口等
+// 核心运行时，管理消息循环、工具调用、权限检查、上下文窗口等。
+//
+// 架构概览：
+//   run_stream() → spawn 后台 task → 迭代循环 {
+//     1. 检查上下文压缩/溢出
+//     2. 调用 LLM（120s 超时）
+//     3. 解析流式响应（Token/ToolCallStart/ToolCallEnd/Done/Error）
+//     4. 如有工具调用：权限检查 → 并行执行 → doom loop 检测 → 注入结果
+//     5. 通过 mpsc channel 发送事件到 UI
+//   }
+//
+// 关键安全机制：
+// - MAX_TOOL_OUTPUT_BYTES: 单个工具输出上限，防止上下文爆炸
+// - MAX_TURN_TOOL_OUTPUT_BYTES: 每轮累积输出上限，超限强制压缩
+// - Doom Loop: 连续 3 次相同工具+参数调用自动终止
+// - LLM 超时: 120s 无响应自动终止
+// - 压缩后注入任务提醒: 防止 LLM 丢失原始任务目标
 
-/// 工具输出最大字节数（约 4K tokens）
+/// 工具输出最大字节数（约 4K tokens）。超过此值的输出会被截断，
+/// 防止单个工具（如读取大文件）撑爆上下文窗口。
 const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
 
-/// 每轮工具输出总字节数上限（约 50K tokens）
-/// 超过此值后强制压缩上下文
+/// 每轮工具输出总字节数上限（约 50K tokens）。
+/// 当一轮对话中所有工具输出累积超过此值时，强制压缩上下文，
+/// 防止多轮文件读取导致上下文膨胀。
 const MAX_TURN_TOOL_OUTPUT_BYTES: usize = 200 * 1024;
 
-/// 截断工具输出到指定字节数，确保保持在上下文窗口内
-/// 会正确处理 UTF-8 字符边界
+/// 截断工具输出到指定字节数，确保保持在上下文窗口内。
+/// 会正确处理 UTF-8 字符边界（不会在多字节字符中间截断）。
 pub fn truncate_tool_output(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
