@@ -105,7 +105,7 @@ impl Default for AgentConfig {
             model: "gpt-4".to_string(),
             temperature: 0.7,
             max_tokens: 4096,
-            max_iterations: 100,
+            max_iterations: 300,
             working_dir: ".".to_string(),
             permission_mode: "default".to_string(),
             context_max_tokens: 100_000,

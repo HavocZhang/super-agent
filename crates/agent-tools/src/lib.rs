@@ -1,6 +1,7 @@
 mod file_edit;
 mod file_read;
 mod file_write;
+mod custom_skill;
 mod git_commit;
 mod git_diff;
 mod git_status;
@@ -14,6 +15,7 @@ mod registry;
 mod shell;
 mod skill_list;
 mod skill_read;
+mod util;
 mod web_search;
 
 pub use mcp_manager::McpManager;
@@ -90,99 +92,11 @@ pub fn register_custom_tools(registry: &mut ToolRegistry, skills_dir: &str) {
         let skill_file = entry.path().join("SKILL.md");
         if skill_file.exists() {
             if let Ok(content) = std::fs::read_to_string(&skill_file) {
-                if let Some(tool) = CustomSkillTool::from_skill_md(&name, &content) {
+                if let Some(tool) = custom_skill::CustomSkillTool::from_skill_md(&name, &content) {
                     tracing::info!("Registered custom skill tool: {}", name);
                     registry.register(Box::new(tool));
                 }
             }
         }
-    }
-}
-
-struct CustomSkillTool {
-    name: String,
-    description: String,
-    instructions: String,
-}
-
-impl CustomSkillTool {
-    fn from_skill_md(name: &str, content: &str) -> Option<Self> {
-        let description = extract_frontmatter_field(content, "description")
-            .unwrap_or_else(|| format!("Custom skill: {}", name));
-
-        let instructions = extract_body(content).to_string();
-
-        Some(Self {
-            name: format!("skill_{}", name),
-            description,
-            instructions,
-        })
-    }
-}
-
-fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
-    let content = content.trim();
-    if !content.starts_with("---") {
-        return None;
-    }
-    let after_first = &content[3..];
-    let end = after_first.find("---")?;
-    let frontmatter = &after_first[..end];
-
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix(&format!("{}:", field)) {
-            return Some(val.trim().to_string());
-        }
-    }
-    None
-}
-
-fn extract_body(content: &str) -> &str {
-    let content = content.trim();
-    if !content.starts_with("---") {
-        return content;
-    }
-    let after_first = &content[3..];
-    if let Some(end) = after_first.find("---") {
-        let rest = &after_first[end + 3..];
-        rest.trim()
-    } else {
-        content
-    }
-}
-
-#[async_trait]
-impl Tool for CustomSkillTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "description": "The task to accomplish using this skill"
-                }
-            },
-            "required": ["task"]
-        })
-    }
-
-    async fn execute(&self, args: &Value, _working_dir: &str) -> anyhow::Result<String> {
-        let task = args["task"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'task' argument"))?;
-
-        Ok(format!(
-            "Skill '{}' instructions:\n\n{}\n\nTask: {}",
-            self.name, self.instructions, task
-        ))
     }
 }

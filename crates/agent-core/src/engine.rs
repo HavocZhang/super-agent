@@ -248,6 +248,7 @@ impl AgentEngine {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         // Spawn the agent loop as a background task
+        let original_task = user_message.to_string();
         tokio::spawn(async move {
             let mut last_call_signature: Option<String> = None;
             let mut consecutive_same_tool: usize = 0;
@@ -265,7 +266,12 @@ impl AgentEngine {
                     let mut msgs = messages.write().await;
                     *msgs = compacted;
                     turn_tool_bytes = 0;
-                    info!("Forced compaction done");
+                    // Inject task reminder after compaction
+                    msgs.push(Message::system(&format!(
+                        "[IMPORTANT] Your original task is still pending. Continue working on it. Task: {}",
+                        original_task
+                    )));
+                    info!("Forced compaction done, task reminder injected");
                 }
 
                 // Check context compaction
@@ -276,7 +282,12 @@ impl AgentEngine {
                         let mut msgs = messages.write().await;
                         *msgs = compacted;
                         turn_tool_bytes = 0;
-                        info!("Context auto-compacted");
+                        // Inject task reminder after compaction
+                        msgs.push(Message::system(&format!(
+                            "[IMPORTANT] Your original task is still pending. Continue working on it. Task: {}",
+                            original_task
+                        )));
+                        info!("Context auto-compacted, task reminder injected");
                     }
                 }
 

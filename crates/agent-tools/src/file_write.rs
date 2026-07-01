@@ -1,16 +1,8 @@
 use crate::Tool;
+use crate::util::resolve_path;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
-
-fn resolve_path(path: &str, working_dir: &str) -> String {
-    let p = Path::new(path);
-    if p.is_absolute() {
-        path.to_string()
-    } else {
-        Path::new(working_dir).join(path).to_string_lossy().to_string()
-    }
-}
 
 pub struct FileWriteTool;
 
