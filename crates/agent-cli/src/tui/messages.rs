@@ -572,4 +572,88 @@ mod tests {
         assert!(content.contains('✗'), "error should show ✗ prefix: {content}");
         assert!(content.contains("something failed"));
     }
+
+    #[test]
+    fn test_stress_many_file_reads_then_stream() {
+        // Simulate: 50 file reads + then streaming assistant text
+        let mut m = MessagesArea::new();
+        let dur = std::time::Duration::from_millis(100);
+
+        for i in 0..50 {
+            let name = format!("src/file_{}.rs", i);
+            m.push_tool(crate::tui::tool_block::ToolBlock::new("file_read", &name));
+            m.finish_last_tool(&format!("// content of file {}", i), dur);
+        }
+
+        // Then start streaming assistant text
+        m.push_assistant("Here is my analysis of the code:\n\n");
+        for i in 0..100 {
+            m.append_to_last(&format!("Line {} of the response. ", i));
+        }
+
+        // Render — should NOT panic or freeze
+        let buf = test_render(120, 40, |f| {
+            m.render(f, f.area());
+        });
+        let content = buf_to_string(&buf);
+        // Should show some content (not empty)
+        assert!(content.len() > 10, "rendered content should not be empty: {}", content.len());
+    }
+
+    #[test]
+    fn test_prefix_cache_invalidates_on_push() {
+        let mut m = MessagesArea::new();
+        m.push_user("hello");
+        m.push_assistant("hi");
+
+        let buf1 = test_render(60, 5, |f| { m.render(f, f.area()); });
+        let c1 = buf_to_string(&buf1);
+
+        // Push new message — prefix should invalidate
+        m.push_user("another");
+        let buf2 = test_render(60, 5, |f| { m.render(f, f.area()); });
+        let c2 = buf_to_string(&buf2);
+
+        assert!(c2.contains("another"), "new message should appear: {c2}");
+    }
+
+    #[test]
+    fn test_streaming_doesnt_break_render() {
+        // Simulate streaming: many append_to_last calls
+        let mut m = MessagesArea::new();
+        m.push_user("write a long function");
+        m.push_assistant("");
+
+        for i in 0..500 {
+            m.append_to_last(&format!("token_{} ", i));
+        }
+
+        // Should not panic
+        let buf = test_render(80, 24, |f| { m.render(f, f.area()); });
+        let content = buf_to_string(&buf);
+        assert!(content.contains("token_"), "streamed tokens should appear: {}", &content[..100.min(content.len())]);
+    }
+
+    #[test]
+    fn test_scroll_during_streaming() {
+        let mut m = MessagesArea::new();
+        m.push_user("hello");
+        m.push_assistant("");
+
+        for i in 0..100 {
+            m.append_to_last(&format!("line {} of response\n", i));
+        }
+
+        // Scroll up
+        m.scroll_up(10);
+        assert!(!m.auto_scroll);
+
+        // Render should not panic
+        let buf = test_render(80, 10, |f| { m.render(f, f.area()); });
+        let _ = buf_to_string(&buf);
+
+        // Scroll back down
+        m.scroll_down(10);
+        assert!(m.auto_scroll);
+    }
 }
