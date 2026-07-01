@@ -136,3 +136,67 @@ fn truncate_str(s: &str, max_width: usize) -> String {
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn test_render<F: FnOnce(&mut ratatui::Frame)>(width: u16, height: u16, render_fn: F) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_fn(f)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buf_to_string(buf: &ratatui::buffer::Buffer) -> String {
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn test_header_render() {
+        let mut h = Header::new();
+        h.set_model("gpt-4o");
+        h.set_context_pct(42);
+        let buf = test_render(80, 1, |f| {
+            h.render(f, f.area());
+        });
+        let content = buf_to_string(&buf);
+        assert!(content.contains("agent"), "should show brand: {content}");
+        assert!(content.contains("gpt-4o"), "should show model: {content}");
+        assert!(content.contains("42%"), "should show context pct: {content}");
+    }
+
+    #[test]
+    fn test_context_bar_colors() {
+        // Test that different context_pct values render correctly via public API
+        for pct in [0u8, 50, 80, 95] {
+            let mut h = Header::new();
+            h.set_context_pct(pct);
+            let buf = test_render(80, 1, |f| {
+                h.render(f, f.area());
+            });
+            let content = buf_to_string(&buf);
+            assert!(content.contains(&format!("{}%", pct)), "should show pct={pct}: {content}");
+        }
+        // Verify color thresholds via theme function
+        assert_eq!(theme::context_bar_color(0), theme::PRIMARY);
+        assert_eq!(theme::context_bar_color(50), theme::PRIMARY);
+        assert_eq!(theme::context_bar_color(80), theme::WARNING);
+        assert_eq!(theme::context_bar_color(95), theme::ERROR);
+    }
+
+    #[test]
+    fn test_truncate_str() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+        assert_eq!(truncate_str("hello world long", 8), "hello wo…");
+        assert_eq!(truncate_str("", 5), "");
+    }
+}

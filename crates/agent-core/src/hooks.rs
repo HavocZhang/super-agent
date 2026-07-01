@@ -222,4 +222,96 @@ mod tests {
         let result = exec.execute(HookEvent::PreToolUse, &serde_json::json!({})).await;
         assert_eq!(result, HookResult::Pass);
     }
+
+    #[tokio::test]
+    async fn test_hook_timeout() {
+        let mut exec = HookExecutor::new();
+        exec.add_hook(HookConfig {
+            event: HookEvent::PreToolUse,
+            command: "sleep 10".to_string(),
+            timeout_ms: 100,
+            blocking: true,
+        });
+        let result = exec.execute(HookEvent::PreToolUse, &serde_json::json!({})).await;
+        assert_eq!(result, HookResult::Timeout);
+    }
+
+    #[tokio::test]
+    async fn test_hook_error() {
+        let mut exec = HookExecutor::new();
+        exec.add_hook(HookConfig {
+            event: HookEvent::PreToolUse,
+            command: "kill -KILL $$".to_string(),
+            timeout_ms: 5000,
+            blocking: true,
+        });
+        let result = exec.execute(HookEvent::PreToolUse, &serde_json::json!({})).await;
+        // Signal-killed process returns None exit code → Error, or may return Warn on some platforms
+        assert!(
+            matches!(result, HookResult::Error(_)) || matches!(result, HookResult::Warn(_)),
+            "Expected Error or Warn, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hook_multiple_hooks() {
+        let mut exec = HookExecutor::new();
+        exec.add_hook(HookConfig {
+            event: HookEvent::PreToolUse,
+            command: "exit 2".to_string(),
+            timeout_ms: 5000,
+            blocking: true,
+        });
+        exec.add_hook(HookConfig {
+            event: HookEvent::PreToolUse,
+            command: "echo should_not_run".to_string(),
+            timeout_ms: 5000,
+            blocking: true,
+        });
+        let result = exec.execute(HookEvent::PreToolUse, &serde_json::json!({})).await;
+        assert!(matches!(result, HookResult::Block(_)));
+    }
+
+    #[tokio::test]
+    async fn test_hook_non_blocking_exit_2() {
+        let mut exec = HookExecutor::new();
+        exec.add_hook(HookConfig {
+            event: HookEvent::PreToolUse,
+            command: "echo warning_msg; exit 2".to_string(),
+            timeout_ms: 5000,
+            blocking: false,
+        });
+        let result = exec.execute(HookEvent::PreToolUse, &serde_json::json!({})).await;
+        assert!(matches!(result, HookResult::Warn(_)));
+    }
+
+    #[tokio::test]
+    async fn test_hook_payload_json() {
+        let mut exec = HookExecutor::new();
+        exec.add_hook(HookConfig {
+            event: HookEvent::PreToolUse,
+            command: "read line; test \"$line\" = '{\"key\":\"val\"}'".to_string(),
+            timeout_ms: 5000,
+            blocking: true,
+        });
+        let result = exec.execute(HookEvent::PreToolUse, &serde_json::json!({"key":"val"})).await;
+        assert_eq!(result, HookResult::Pass);
+    }
+
+    #[test]
+    fn test_hook_events_list() {
+        let events = [
+            HookEvent::PreToolUse,
+            HookEvent::PostToolUse,
+            HookEvent::UserPromptSubmit,
+            HookEvent::Stop,
+            HookEvent::SessionStart,
+            HookEvent::SessionEnd,
+            HookEvent::SubagentStop,
+            HookEvent::Notification,
+            HookEvent::PreCompact,
+        ];
+        assert_eq!(events.len(), 9);
+    }
 }

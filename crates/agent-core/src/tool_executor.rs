@@ -33,6 +33,7 @@ impl ToolExecutor {
                         let registry = Arc::clone(&self.registry);
                         let wd = working_dir.to_string();
                         tokio::spawn(async move {
+                            let arguments_hash = compute_arguments_hash(&tc.arguments);
                             let output = registry
                                 .execute(&tc.name, &tc.arguments, &wd)
                                 .await;
@@ -40,6 +41,7 @@ impl ToolExecutor {
                                 tool_call_id: tc.id,
                                 name: tc.name,
                                 arguments: tc.arguments,
+                                arguments_hash,
                                 output: match output {
                                     Ok(o) => o,
                                     Err(e) => format!("Error: {}", e),
@@ -56,6 +58,7 @@ impl ToolExecutor {
                             tool_call_id: String::new(),
                             name: "unknown".to_string(),
                             arguments: serde_json::json!({}),
+                            arguments_hash: String::new(),
                             output: format!("Task panicked: {}", e),
                         }),
                     }
@@ -80,6 +83,7 @@ impl ToolExecutor {
         ToolResult {
             tool_call_id: tc.id.clone(),
             name: tc.name.clone(),
+            arguments_hash: compute_arguments_hash(&tc.arguments),
             arguments: tc.arguments.clone(),
             output,
         }
@@ -91,7 +95,15 @@ pub struct ToolResult {
     pub tool_call_id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    pub arguments_hash: String,
     pub output: String,
+}
+
+fn compute_arguments_hash(args: &serde_json::Value) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    args.to_string().hash(&mut h);
+    format!("{:x}", h.finish())
 }
 
 fn is_parallelizable(name: &str) -> bool {

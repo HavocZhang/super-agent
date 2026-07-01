@@ -11,9 +11,9 @@ use crate::tui::theme;
 use crate::tui::tool_block::ToolBlock;
 
 pub struct MessagesArea {
-    messages: Vec<ChatMessage>,
-    scroll_offset: usize,
-    auto_scroll: bool,
+    pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) scroll_offset: usize,
+    pub(crate) auto_scroll: bool,
     markdown: MarkdownRenderer,
     cached_lines: RefCell<Vec<Line<'static>>>,
     cache_valid: RefCell<bool>,
@@ -417,4 +417,157 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
         result.push(String::new());
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn test_render<F: FnOnce(&mut ratatui::Frame)>(width: u16, height: u16, render_fn: F) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_fn(f)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buf_to_string(buf: &ratatui::buffer::Buffer) -> String {
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn test_push_user() {
+        let mut m = MessagesArea::new();
+        m.push_user("hello");
+        assert_eq!(m.messages.len(), 1);
+        assert!(matches!(&m.messages[0], ChatMessage::User(s) if s == "hello"));
+    }
+
+    #[test]
+    fn test_push_assistant() {
+        let mut m = MessagesArea::new();
+        m.push_assistant("hi there");
+        assert_eq!(m.messages.len(), 1);
+        assert!(matches!(&m.messages[0], ChatMessage::Assistant(s) if s == "hi there"));
+    }
+
+    #[test]
+    fn test_append_to_last() {
+        let mut m = MessagesArea::new();
+        m.push_assistant("hello");
+        m.append_to_last(" world");
+        assert!(matches!(&m.messages[0], ChatMessage::Assistant(s) if s == "hello world"));
+    }
+
+    #[test]
+    fn test_append_to_last_non_assistant_creates_new() {
+        let mut m = MessagesArea::new();
+        m.push_user("hello");
+        m.append_to_last(" world");
+        assert_eq!(m.messages.len(), 2);
+        assert!(matches!(&m.messages[1], ChatMessage::Assistant(s) if s == " world"));
+    }
+
+    #[test]
+    fn test_update_last_tool_args() {
+        let mut m = MessagesArea::new();
+        m.push_tool(crate::tui::tool_block::ToolBlock::new("shell", ""));
+        m.update_last_tool_args("ls -la");
+        if let ChatMessage::ToolCall(ref block) = m.messages[0] {
+            assert_eq!(block.arguments, "ls -la");
+        } else {
+            panic!("expected ToolCall");
+        }
+    }
+
+    #[test]
+    fn test_finish_last_tool() {
+        let mut m = MessagesArea::new();
+        m.push_tool(crate::tui::tool_block::ToolBlock::new("shell", "echo hi"));
+        let dur = std::time::Duration::from_millis(100);
+        m.finish_last_tool("output", dur);
+        if let ChatMessage::ToolCall(ref block) = m.messages[0] {
+            assert_eq!(block.output, "output");
+            assert!(matches!(block.state, crate::tui::tool_block::ToolState::Success(_)));
+        } else {
+            panic!("expected ToolCall");
+        }
+    }
+
+    #[test]
+    fn test_last_is_assistant() {
+        let mut m = MessagesArea::new();
+        assert!(!m.last_is_assistant());
+        m.push_user("hi");
+        assert!(!m.last_is_assistant());
+        m.push_assistant("hello");
+        assert!(m.last_is_assistant());
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut m = MessagesArea::new();
+        m.push_user("a");
+        m.push_assistant("b");
+        m.push_error("c");
+        m.clear();
+        assert!(m.messages.is_empty());
+        assert_eq!(m.scroll_offset, 0);
+        assert!(m.auto_scroll);
+    }
+
+    #[test]
+    fn test_scroll_up_down() {
+        let mut m = MessagesArea::new();
+        m.push_user("msg");
+        m.scroll_up(5);
+        assert_eq!(m.scroll_offset, 5);
+        assert!(!m.auto_scroll);
+        m.scroll_down(3);
+        assert_eq!(m.scroll_offset, 2);
+        m.scroll_down(10);
+        assert_eq!(m.scroll_offset, 0);
+        assert!(m.auto_scroll);
+    }
+
+    #[test]
+    fn test_render_empty() {
+        let m = MessagesArea::new();
+        let buf = test_render(40, 3, |f| {
+            m.render(f, f.area());
+        });
+        let content = buf_to_string(&buf);
+        assert!(content.contains("Ready"), "empty messages should show Ready hint: {content}");
+    }
+
+    #[test]
+    fn test_render_user_message() {
+        let mut m = MessagesArea::new();
+        m.push_user("test input");
+        let buf = test_render(40, 3, |f| {
+            m.render(f, f.area());
+        });
+        let content = buf_to_string(&buf);
+        assert!(content.contains('┃'), "user message should have vertical bar prefix: {content}");
+        assert!(content.contains("test input"));
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut m = MessagesArea::new();
+        m.push_error("something failed");
+        let buf = test_render(40, 3, |f| {
+            m.render(f, f.area());
+        });
+        let content = buf_to_string(&buf);
+        assert!(content.contains('✗'), "error should show ✗ prefix: {content}");
+        assert!(content.contains("something failed"));
+    }
 }

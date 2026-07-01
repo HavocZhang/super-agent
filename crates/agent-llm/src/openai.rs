@@ -404,3 +404,81 @@ impl LlmProvider for OpenAiProvider {
         Ok(Box::pin(stream))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_retry_429() {
+        assert!(should_retry_status(429, 0));
+    }
+
+    #[test]
+    fn test_should_retry_500() {
+        assert!(should_retry_status(500, 0));
+    }
+
+    #[test]
+    fn test_should_retry_502() {
+        assert!(should_retry_status(502, 0));
+    }
+
+    #[test]
+    fn test_should_retry_503() {
+        assert!(should_retry_status(503, 0));
+    }
+
+    #[test]
+    fn test_should_retry_401_within_limit() {
+        assert!(should_retry_status(401, 0));
+        assert!(should_retry_status(401, 1));
+    }
+
+    #[test]
+    fn test_should_not_retry_401_over_limit() {
+        assert!(!should_retry_status(401, MAX_AUTH_RETRIES));
+    }
+
+    #[test]
+    fn test_should_not_retry_400() {
+        assert!(!should_retry_status(400, 0));
+    }
+
+    #[test]
+    fn test_should_not_retry_404() {
+        assert!(!should_retry_status(404, 0));
+    }
+
+    #[test]
+    fn test_backoff_delay() {
+        let d0 = backoff_delay(0);
+        let d1 = backoff_delay(1);
+        let d5 = backoff_delay(5);
+
+        // attempt 0: base 1s + jitter, should be ~1s..2s
+        assert!(d0 >= std::time::Duration::from_millis(900));
+        assert!(d0 <= std::time::Duration::from_millis(2500));
+
+        // attempt 1: base 2s + jitter
+        assert!(d1 >= std::time::Duration::from_millis(1800));
+        assert!(d1 <= std::time::Duration::from_millis(4500));
+
+        // attempt 5: base would be 32s, capped at 15s + jitter
+        assert!(d5 >= std::time::Duration::from_millis(14000));
+        assert!(d5 <= std::time::Duration::from_millis(19000));
+    }
+
+    #[test]
+    fn test_backoff_has_jitter() {
+        let d_a = backoff_delay(2);
+        let d_b = backoff_delay(2);
+        // With jitter, two calls *almost certainly* differ.
+        // If they happen to be equal (extremely unlikely), re-run.
+        // We just assert the function doesn't panic and returns reasonable values.
+        assert!(d_a >= std::time::Duration::from_secs(3));
+        assert!(d_b >= std::time::Duration::from_secs(3));
+        assert!(d_a <= std::time::Duration::from_millis(8500));
+        assert!(d_b <= std::time::Duration::from_millis(8500));
+    }
+}

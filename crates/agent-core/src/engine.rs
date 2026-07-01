@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 
 const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024; // ~8K tokens
 
-fn truncate_tool_output(s: &str, max_bytes: usize) -> String {
+pub fn truncate_tool_output(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
     }
@@ -188,7 +188,7 @@ impl AgentEngine {
 
         // Spawn the agent loop as a background task
         tokio::spawn(async move {
-            let mut last_tool_name: Option<String> = None;
+            let mut last_call_signature: Option<String> = None;
             let mut consecutive_same_tool: usize = 0;
 
             for iteration in 0..max_iter {
@@ -328,15 +328,17 @@ impl AgentEngine {
 
                         let results = tool_executor.execute_batch(&approved_calls, &wd).await;
                         let mut doom_loop_hit = false;
+                        let mut last_tool_call_id = String::new();
                         for result in results {
                             let output = truncate_tool_output(&result.output, MAX_TOOL_OUTPUT_BYTES);
                             info!("Tool {} done ({} bytes)", result.name, output.len());
 
                             // Doom loop detection
-                            if last_tool_name.as_deref() == Some(&result.name) {
+                            let call_signature = format!("{}:{}", result.name, result.arguments_hash);
+                            if last_call_signature.as_deref() == Some(&call_signature) {
                                 consecutive_same_tool += 1;
                             } else {
-                                last_tool_name = Some(result.name.clone());
+                                last_call_signature = Some(call_signature);
                                 consecutive_same_tool = 1;
                             }
 
@@ -355,6 +357,7 @@ impl AgentEngine {
                             if consecutive_same_tool >= 3 {
                                 warn!("Doom loop detected: tool {} called 3 times consecutively", result.name);
                                 doom_loop_hit = true;
+                                last_tool_call_id = result.tool_call_id.clone();
                                 let _ = tx.send(Ok(StreamEvent::Error(
                                     format!("Doom loop detected: tool {} called 3 times consecutively", result.name)
                                 ))).await;
@@ -363,6 +366,22 @@ impl AgentEngine {
                         }
 
                         if doom_loop_hit {
+                            // Backfill tool_results for unexecuted tool_calls
+                            let unexecuted: Vec<String> = tool_calls_pending
+                                .iter()
+                                .skip_while(|tc| tc.id != last_tool_call_id)
+                                .skip(1)
+                                .map(|tc| tc.id.clone())
+                                .collect();
+                            if !unexecuted.is_empty() {
+                                let mut msgs = messages.write().await;
+                                for tc_id in unexecuted {
+                                    msgs.push(Message::tool_result(
+                                        &tc_id,
+                                        "Tool execution skipped due to doom loop detection",
+                                    ));
+                                }
+                            }
                             return;
                         }
 
@@ -431,5 +450,40 @@ fn extract_and_store_memory_static(memory: &Option<Arc<MemoryStore>>, response: 
         if let Err(e) = memory.store(&content, "extracted", 0.6) {
             debug!("Failed to store memory: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_short_output() {
+        let output = "short";
+        let result = truncate_tool_output(output, 100);
+        assert_eq!(result, "short");
+    }
+
+    #[test]
+    fn test_truncate_long_output() {
+        let output = "a".repeat(50000);
+        let result = truncate_tool_output(&output, 32 * 1024);
+        assert!(result.len() < 50000);
+        assert!(result.contains("truncated"));
+    }
+
+    #[test]
+    fn test_truncate_exact_boundary() {
+        let output = "a".repeat(32 * 1024);
+        let result = truncate_tool_output(&output, 32 * 1024);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_truncate_utf8_boundary() {
+        let output = "你好世界".repeat(20000);
+        let result = truncate_tool_output(&output, 32 * 1024);
+        assert!(result.len() <= 32 * 1024 + 100);
+        assert!(result.contains("truncated"));
     }
 }

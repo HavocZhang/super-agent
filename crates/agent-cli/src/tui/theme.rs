@@ -53,3 +53,45 @@ pub fn context_bar_color(pct: u8) -> Color {
         PRIMARY
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::tool_block::ToolFamily;
+
+    #[test]
+    fn test_tool_color() {
+        assert_eq!(tool_color("file_write"), TOOL_CREATE);
+        assert_eq!(tool_color("file_edit"), TOOL_EDIT);
+        assert_eq!(tool_color("file_read"), TOOL_READ);
+        assert_eq!(tool_color("shell"), TOOL_RUN);
+        assert_eq!(tool_color("grep"), TOOL_SEARCH);
+        assert_eq!(tool_color("glob"), TOOL_SEARCH);
+        assert_eq!(tool_color("git_commit"), TOOL_RUN);
+        assert_eq!(tool_color("git_diff"), TOOL_RUN);
+        assert_eq!(tool_color("git_status"), TOOL_RUN);
+        assert_eq!(tool_color("unknown_tool"), TOOL_DEFAULT);
+    }
+
+    #[test]
+    fn test_context_bar_color() {
+        assert_eq!(context_bar_color(0), PRIMARY);
+        assert_eq!(context_bar_color(50), PRIMARY);
+        assert_eq!(context_bar_color(79), PRIMARY);
+        assert_eq!(context_bar_color(80), WARNING);
+        assert_eq!(context_bar_color(94), WARNING);
+        assert_eq!(context_bar_color(95), ERROR);
+        assert_eq!(context_bar_color(100), ERROR);
+    }
+
+    #[test]
+    fn test_family_color() {
+        assert_eq!(family_color(ToolFamily::Read), Color::Magenta);
+        assert_eq!(family_color(ToolFamily::Patch), Color::Yellow);
+        assert_eq!(family_color(ToolFamily::Run), Color::Cyan);
+        assert_eq!(family_color(ToolFamily::Find), Color::Blue);
+        assert_eq!(family_color(ToolFamily::Delegate), Color::Green);
+        assert_eq!(family_color(ToolFamily::Think), Color::DarkGray);
+        assert_eq!(family_color(ToolFamily::Generic), Color::DarkGray);
+    }
+}

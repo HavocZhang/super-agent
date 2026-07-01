@@ -63,6 +63,46 @@ impl Spinner {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spinner_start_stop() {
+        let mut s = Spinner::new("work");
+        assert!(!s.is_running());
+        assert_eq!(s.tick(), "");
+        assert!(s.render_line().is_empty());
+
+        s.start();
+        assert!(s.is_running());
+        let frame = s.tick();
+        assert!(!frame.is_empty());
+
+        s.stop();
+        assert!(!s.is_running());
+        assert_eq!(s.tick(), "");
+    }
+
+    #[test]
+    fn test_spinner_tick() {
+        let mut s = Spinner::new("test");
+        s.start();
+        let first = s.tick().to_string();
+        // Fast ticks within FRAME_INTERVAL stay on same frame
+        let second = s.tick().to_string();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_fmt_elapsed() {
+        assert_eq!(fmt_elapsed(Duration::from_secs(5)), "5s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(63)), "1m 03s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(7389)), "2h 03m 09s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(0)), "0s");
+    }
+}
+
 pub fn fmt_elapsed(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     if secs < 60 {

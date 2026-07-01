@@ -13,7 +13,7 @@ pub mod subagent;
 pub mod tool_executor;
 
 pub use context::{ContextManager, OverflowLevel, ContextStatus, DEFAULT_MAX_TOKENS, WARNING_THRESHOLD, COMPACTION_BUFFER, PRUNE_MINIMUM, PRUNE_PROTECT, PROTECTED_TOOLS};
-pub use engine::AgentEngine;
+pub use engine::{AgentEngine, truncate_tool_output};
 pub use file_diff::FileDiff;
 pub use snapshot::{SnapshotFileDiff, SnapshotManager, SnapshotPatch, SnapshotDiffStatus};
 pub use learning_loop::LearningLoop;

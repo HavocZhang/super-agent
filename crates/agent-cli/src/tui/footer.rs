@@ -180,3 +180,72 @@ impl Footer {
         format!("…{}", suffix)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn test_render<F: FnOnce(&mut ratatui::Frame)>(width: u16, height: u16, render_fn: F) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_fn(f)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buf_to_string(buf: &ratatui::buffer::Buffer) -> String {
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn test_footer_render() {
+        let mut f = Footer::new();
+        f.set_directory("~/projects/app");
+        f.set_status("Ready");
+        f.set_model("gpt-4o");
+        f.set_token_pct(55);
+        let buf = test_render(80, 1, |f_| {
+            f.render(f_, f_.area());
+        });
+        let content = buf_to_string(&buf);
+        assert!(content.contains("~/projects/app"), "should show directory: {content}");
+        assert!(content.contains("Ready"), "should show status: {content}");
+        assert!(content.contains("gpt-4o"), "should show model: {content}");
+        assert!(content.contains("55%"), "should show token pct: {content}");
+        assert!(content.contains("^C"), "should show keybinds: {content}");
+    }
+
+    #[test]
+    fn test_truncate_left() {
+        let f = Footer::new();
+        let result = f.truncate_left("/very/long/path/to/project", 12);
+        assert!(result.starts_with('…'), "should start with ellipsis: {result}");
+        assert!(result.len() <= 12 || result.chars().count() <= 12);
+    }
+
+    #[test]
+    fn test_streaming_spinner() {
+        let mut f = Footer::new();
+        f.set_streaming(true);
+        f.tick();
+        let buf = test_render(40, 1, |f_| {
+            f.render(f_, f_.area());
+        });
+        let content = buf_to_string(&buf);
+        // Braille spinner characters should be present
+        assert!(
+            content.contains('⠋') || content.contains('⠙') || content.contains('⠹')
+                || content.contains('⠸') || content.contains('⠼') || content.contains('⠴')
+                || content.contains('⠦') || content.contains('⠧') || content.contains('⠇')
+                || content.contains('⠏'),
+            "streaming should show braille spinner: {content}"
+        );
+    }
+}

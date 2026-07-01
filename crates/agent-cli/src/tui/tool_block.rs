@@ -234,3 +234,118 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
         format!("{}…", s.chars().take(max_chars.saturating_sub(1)).collect::<String>())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn test_render<F: FnOnce(&mut ratatui::Frame)>(width: u16, height: u16, render_fn: F) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_fn(f)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn test_tool_family_mapping() {
+        assert_eq!(tool_family_for_name("file_read"), ToolFamily::Read);
+        assert_eq!(tool_family_for_name("ls"), ToolFamily::Read);
+        assert_eq!(tool_family_for_name("file_write"), ToolFamily::Patch);
+        assert_eq!(tool_family_for_name("file_edit"), ToolFamily::Patch);
+        assert_eq!(tool_family_for_name("shell"), ToolFamily::Run);
+        assert_eq!(tool_family_for_name("git_commit"), ToolFamily::Run);
+        assert_eq!(tool_family_for_name("git_diff"), ToolFamily::Run);
+        assert_eq!(tool_family_for_name("git_status"), ToolFamily::Run);
+        assert_eq!(tool_family_for_name("grep"), ToolFamily::Find);
+        assert_eq!(tool_family_for_name("glob"), ToolFamily::Find);
+        assert_eq!(tool_family_for_name("web_search"), ToolFamily::Find);
+        assert_eq!(tool_family_for_name("unknown"), ToolFamily::Generic);
+    }
+
+    #[test]
+    fn test_family_glyph() {
+        assert_eq!(family_glyph(ToolFamily::Read), "▷");
+        assert_eq!(family_glyph(ToolFamily::Patch), "◆");
+        assert_eq!(family_glyph(ToolFamily::Run), "▶");
+        assert_eq!(family_glyph(ToolFamily::Find), "⌕");
+        assert_eq!(family_glyph(ToolFamily::Delegate), "◐");
+        assert_eq!(family_glyph(ToolFamily::Think), "…");
+        assert_eq!(family_glyph(ToolFamily::Generic), "•");
+    }
+
+    #[test]
+    fn test_family_label() {
+        assert_eq!(family_label(ToolFamily::Read), "read");
+        assert_eq!(family_label(ToolFamily::Patch), "patch");
+        assert_eq!(family_label(ToolFamily::Run), "run");
+        assert_eq!(family_label(ToolFamily::Find), "find");
+        assert_eq!(family_label(ToolFamily::Delegate), "delegate");
+        assert_eq!(family_label(ToolFamily::Think), "think");
+        assert_eq!(family_label(ToolFamily::Generic), "tool");
+    }
+
+    #[test]
+    fn test_tool_block_new() {
+        let block = ToolBlock::new("shell", "ls -la");
+        assert_eq!(block.name, "shell");
+        assert_eq!(block.arguments, "ls -la");
+        assert!(block.output.is_empty());
+        assert!(matches!(block.state, ToolState::Running));
+        assert!(!block.collapsed);
+    }
+
+    #[test]
+    fn test_tool_block_finish_ok() {
+        let mut block = ToolBlock::new("shell", "echo hi");
+        let dur = Duration::from_millis(150);
+        block.finish_ok("hi\n", dur);
+        assert_eq!(block.output, "hi\n");
+        assert!(matches!(block.state, ToolState::Success(d) if d == dur));
+    }
+
+    #[test]
+    fn test_tool_block_finish_err() {
+        let mut block = ToolBlock::new("shell", "bad");
+        block.finish_err("command not found");
+        assert!(matches!(block.state, ToolState::Error(ref e) if e == "command not found"));
+    }
+
+    #[test]
+    fn test_render_collapsed() {
+        let mut block = ToolBlock::new("file_read", "src/main.rs");
+        block.collapsed = true;
+        block.finish_ok("fn main() {}", Duration::from_millis(42));
+
+        let buf = test_render(60, 1, |f| {
+            let area = f.area();
+            block.render(f, area, area.width);
+        });
+        let content = buf_to_string(&buf);
+        assert!(content.contains("Read File"), "collapsed should show display name: {content}");
+    }
+
+    #[test]
+    fn test_render_expanded() {
+        let block = ToolBlock::new("shell", "echo hello");
+
+        let buf = test_render(60, 5, |f| {
+            let area = f.area();
+            block.render(f, area, area.width);
+        });
+        let content = buf_to_string(&buf);
+        assert!(content.contains("Run Command"), "expanded should show display name: {content}");
+        assert!(content.contains("echo hello"), "expanded should show arguments: {content}");
+    }
+
+    fn buf_to_string(buf: &ratatui::buffer::Buffer) -> String {
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        s
+    }
+}

@@ -87,4 +87,51 @@ mod tests {
         let committed = lb.take_committable();
         assert_eq!(committed, "hello\nworld\n");
     }
+
+    #[test]
+    fn test_empty_push() {
+        let mut lb = LineBuffer::new();
+        lb.push("hello");
+        lb.push("");
+        assert_eq!(lb.pending_text(), "hello");
+        assert!(lb.has_pending());
+    }
+
+    #[test]
+    fn test_multiple_flush() {
+        let mut lb = LineBuffer::new();
+        lb.push("data");
+        let first = lb.flush();
+        assert_eq!(first, "data");
+        let second = lb.flush();
+        assert_eq!(second, "");
+        assert!(!lb.has_pending());
+    }
+
+    #[test]
+    fn test_pending_text() {
+        let mut lb = LineBuffer::new();
+        lb.push("hello\nworld");
+        lb.take_committable();
+        assert_eq!(lb.pending_text(), "world");
+    }
+
+    #[test]
+    fn test_has_pending() {
+        let mut lb = LineBuffer::new();
+        assert!(!lb.has_pending());
+        lb.push("text");
+        assert!(lb.has_pending());
+        lb.flush();
+        assert!(!lb.has_pending());
+    }
+
+    #[test]
+    fn test_consecutive_newlines() {
+        let mut lb = LineBuffer::new();
+        lb.push("a\n\n\nb\n");
+        let committed = lb.take_committable();
+        assert_eq!(committed, "a\n\n\nb\n");
+        assert_eq!(lb.pending_text(), "");
+    }
 }

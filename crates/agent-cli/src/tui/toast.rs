@@ -77,7 +77,7 @@ impl Toast {
 }
 
 pub struct ToastManager {
-    toasts: Vec<Toast>,
+    pub(crate) toasts: Vec<Toast>,
 }
 
 impl ToastManager {
@@ -94,6 +94,10 @@ impl ToastManager {
 
     pub fn tick(&mut self) {
         self.toasts.retain(|t| !t.is_expired());
+    }
+
+    pub fn len(&self) -> usize {
+        self.toasts.len()
     }
 
     pub fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -140,5 +144,70 @@ impl ToastManager {
             )));
             frame.render_widget(msg, inner);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn test_toast_expiry() {
+        let t = Toast::info("test");
+        assert!(!t.is_expired());
+    }
+
+    #[test]
+    fn test_toast_border_color() {
+        assert_eq!(Toast::info("a").border_color(), theme::PRIMARY);
+        assert_eq!(Toast::success("a").border_color(), theme::SUCCESS);
+        assert_eq!(Toast::warning("a").border_color(), theme::WARNING);
+        assert_eq!(Toast::error("a").border_color(), theme::ERROR);
+    }
+
+    #[test]
+    fn test_toast_manager_max() {
+        let mut mgr = ToastManager::new();
+        for i in 0..10 {
+            mgr.push(Toast::info(&format!("msg {}", i)));
+        }
+        // After pushing 10, only last 5 should remain
+        assert_eq!(mgr.toasts.len(), 5);
+        // The oldest 5 were dropped, so first remaining should be "msg 5"
+        assert_eq!(mgr.toasts[0].message, "msg 5");
+    }
+
+    #[test]
+    fn test_toast_manager_tick_removes_expired() {
+        let mut mgr = ToastManager::new();
+        let mut t = Toast::info("gone");
+        t.duration = Duration::ZERO;
+        t.created_at = Instant::now();
+        mgr.push(t);
+        mgr.push(Toast::info("stay"));
+        mgr.tick();
+        assert_eq!(mgr.toasts.len(), 1);
+        assert_eq!(mgr.toasts[0].message, "stay");
+    }
+
+    #[test]
+    fn test_toast_render() {
+        let mut mgr = ToastManager::new();
+        mgr.push(Toast::info("hello"));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            mgr.render(f, f.area());
+        }).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut content = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                content.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        assert!(content.contains("Info"), "should render toast label: {content}");
     }
 }
